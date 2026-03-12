@@ -1,1 +1,118 @@
+# 🎬 Kling 3.0 Motion Control Telegram Bot
 
+A Telegram bot that uses **ModelsLab’s Kling 3.0 Motion Control API** to animate character images using reference motion videos.
+
+-----
+
+## ✨ Features
+
+- Upload a **character photo** + **motion reference video**
+- Choose prompt, duration (5s / 10s), and quality (Standard / Pro)
+- Bot generates the video and sends it back automatically
+- Polling loop handles async generation (2–5 min wait)
+
+-----
+
+## 🚀 Deploy to Railway (Step by Step)
+
+### Step 1 — Get your API Keys
+
+1. **Telegram Bot Token**
+- Open Telegram → search `@BotFather`
+- Send `/newbot` → follow prompts
+- Copy the token (looks like `123456:ABC-DEF...`)
+1. **ModelsLab API Key**
+- Go to [modelslab.com](https://modelslab.com) → sign in → API Keys
+- Copy your key
+
+-----
+
+### Step 2 — Push to GitHub
+
+```bash
+git init
+git add .
+git commit -m "Initial commit"
+git branch -M main
+git remote add origin https://github.com/YOUR_USERNAME/kling-bot.git
+git push -u origin main
+```
+
+-----
+
+### Step 3 — Deploy on Railway
+
+1. Go to [railway.app](https://railway.app) → **New Project**
+1. Click **Deploy from GitHub repo**
+1. Select your `kling-bot` repository
+1. Railway auto-detects Python via Nixpacks ✅
+
+-----
+
+### Step 4 — Set Environment Variables
+
+In Railway dashboard → your service → **Variables** tab, add:
+
+|Variable           |Value                 |
+|-------------------|----------------------|
+|`TELEGRAM_TOKEN`   |Your BotFather token  |
+|`MODELSLAB_API_KEY`|Your ModelsLab API key|
+
+Click **Deploy** after saving variables.
+
+-----
+
+### Step 5 — Verify
+
+- Railway builds and starts the bot (check **Logs** tab)
+- Open Telegram → find your bot → send `/start`
+- You should see the welcome message 🎉
+
+-----
+
+## 📱 How to Use the Bot
+
+|Command    |Action                |
+|-----------|----------------------|
+|`/start`   |Welcome message       |
+|`/help`    |Usage instructions    |
+|`/generate`|Start video generation|
+|`/cancel`  |Cancel current session|
+
+**Generation flow:**
+
+1. Send `/generate`
+1. Upload character image (JPG/PNG)
+1. Upload motion reference video (MP4/MOV, max 100MB)
+1. Type a scene prompt
+1. Choose duration: 5s or 10s
+1. Choose mode: Standard or Pro
+1. Wait 2–5 min → receive your video!
+
+-----
+
+## 🔧 Local Development
+
+```bash
+pip install -r requirements.txt
+
+# Create .env file:
+export TELEGRAM_TOKEN="your_token_here"
+export MODELSLAB_API_KEY="your_key_here"
+
+python bot.py
+```
+
+-----
+
+## 📁 Project Structure
+
+```
+kling-telegram-bot/
+├── bot.py           # Main bot logic
+├── requirements.txt # Python dependencies
+├── Procfile         # Railway process definition
+├── railway.toml     # Railway config
+├── .gitignore
+└── README.md
+```

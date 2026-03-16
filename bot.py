@@ -19,11 +19,9 @@ level=logging.INFO,
 )
 logger = logging.getLogger(**name**)
 
-TELEGRAM_TOKEN      = os.environ[“TELEGRAM_TOKEN”]
-MODELSLAB_API_KEY   = os.environ[“MODELSLAB_API_KEY”]
-ACCESS_CODE         = os.environ.get(“ACCESS_CODE”, “KLING2025”)   # ← your secret code
-
-# ── Conversation states ──────────────────────────────────────────────────────
+TELEGRAM_TOKEN    = os.environ[“TELEGRAM_TOKEN”]
+MODELSLAB_API_KEY = os.environ[“MODELSLAB_API_KEY”]
+ACCESS_CODE       = os.environ.get(“ACCESS_CODE”, “KLING2025”)
 
 (
 WAITING_CODE,
@@ -34,16 +32,10 @@ WAITING_DURATION,
 WAITING_MODE,
 ) = range(6)
 
-# ── ModelsLab Kling 3.0 API ──────────────────────────────────────────────────
-
 API_URL   = “https://modelslab.com/api/v6/video/kling_motion_control”
 FETCH_URL = “https://modelslab.com/api/v6/video/fetch”
 
-# Set of verified user IDs (in-memory; resets on bot restart)
-
 VERIFIED_USERS: set = set()
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
 
 def is_verified(user_id: int) -> bool:
 return user_id in VERIFIED_USERS
@@ -93,8 +85,6 @@ logger.error(“Generation failed: %s”, data)
 return None
 return None
 
-# ── /start — always ask for code ─────────────────────────────────────────────
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 user_id = update.effective_user.id
 
@@ -128,8 +118,6 @@ else:
     return WAITING_CODE
 ```
 
-# ── /help ─────────────────────────────────────────────────────────────────────
-
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 if not is_verified(update.effective_user.id):
 await update.message.reply_text(“🔐 Please send /start and enter the access code first.”)
@@ -146,12 +134,10 @@ text = (
     "6. Choose *quality mode* (Standard / Pro)\n\n"
     "The bot will generate a video where your character performs the motions "
     "from the reference video! ✨\n\n"
-    "⚠️ Generation takes 2–5 minutes. Please be patient."
+    "⚠️ Generation takes 2-5 minutes. Please be patient."
 )
 await update.message.reply_text(text, parse_mode="Markdown")
 ```
-
-# ── /generate flow ────────────────────────────────────────────────────────────
 
 async def generate_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 if not is_verified(update.effective_user.id):
@@ -204,7 +190,7 @@ context.user_data["video_url"] = file.file_path
 
 await update.message.reply_text(
     "✍️ *Step 3/5* — Type your *scene prompt*.\n\n"
-    "Example: _A girl dancing on a rooftop at sunset, cinematic, slow motion_",
+    "_Example: A girl dancing on a rooftop at sunset, cinematic, slow motion_",
     parse_mode="Markdown",
 )
 return WAITING_PROMPT
@@ -255,7 +241,7 @@ context.user_data[“mode”] = mode
 ```
 await query.edit_message_text(
     "🚀 All set! Generating your video...\n\n"
-    "⏳ This takes 2–5 minutes. I'll message you when it's ready!"
+    "⏳ This takes 2-5 minutes. I will message you when it is ready!"
 )
 
 ud = context.user_data
@@ -287,8 +273,7 @@ request_id = result.get("id") or result.get("request_id")
 if not request_id:
     await context.bot.send_message(
         query.message.chat_id,
-        f"❌ Unexpected API response:\n<code>{result}</code>",
-        parse_mode="HTML",
+        "❌ Unexpected API response: " + str(result),
     )
     return ConversationHandler.END
 
@@ -306,20 +291,18 @@ return ConversationHandler.END
 
 async def send_video_result(bot, chat_id, video_url, ud):
 caption = (
-f”✅ *Your video is ready!*\n\n”
-f”📝 Prompt: *{ud.get(‘prompt’, ‘’)}*\n”
-f”⏱ Duration: {ud.get(‘duration’, ‘?’)}s | Mode: {ud.get(‘mode’, ‘?’).upper()}”
+“✅ *Your video is ready!*\n\n”
+“📝 Prompt: *” + ud.get(“prompt”, “”) + “*\n”
+“⏱ Duration: “ + str(ud.get(“duration”, “?”)) + “s | Mode: “ + ud.get(“mode”, “?”).upper()
 )
 try:
 await bot.send_video(chat_id, video=video_url, caption=caption, parse_mode=“Markdown”)
 except Exception:
 await bot.send_message(
 chat_id,
-f”✅ Video ready!\n🔗 {video_url}\n\n{caption}”,
+“✅ Video ready!\n🔗 “ + video_url + “\n\n” + caption,
 parse_mode=“Markdown”,
 )
-
-# ── /cancel ───────────────────────────────────────────────────────────────────
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 context.user_data.clear()
@@ -329,13 +312,10 @@ return ConversationHandler.END
 async def fallback_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 await update.message.reply_text(“Please follow the steps, or send /cancel to stop.”)
 
-# ── main ──────────────────────────────────────────────────────────────────────
-
 def main():
 app = Application.builder().token(TELEGRAM_TOKEN).build()
 
 ```
-# Auth conversation — /start then code entry
 auth_conv = ConversationHandler(
     entry_points=[CommandHandler("start", start)],
     states={
@@ -347,7 +327,6 @@ auth_conv = ConversationHandler(
     allow_reentry=True,
 )
 
-# Generate conversation
 gen_conv = ConversationHandler(
     entry_points=[CommandHandler("generate", generate_start)],
     states={

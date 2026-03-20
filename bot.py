@@ -98,11 +98,22 @@ SORA_DURATIONS = ("4", "8", "12")
 MENU_BACK_CALLBACK = "menu_back"
 
 LLM_CHAT_API_URL = "https://modelslab.com/api/uncensored-chat/v1/chat/completions"
+LLM_MAX_HISTORY_MESSAGES = 14
 LLM_MODELS = {
     "best": {
         "label": "Best Available (Auto)",
         "ux": "Recommended",
         "model": "ModelsLab/Llama-3.1-8b-Uncensored-Dare",
+    },
+    "chatgpt": {
+        "label": "ChatGPT (OpenAI)",
+        "ux": "Premium",
+        "model": "openai/gpt-4o",
+    },
+    "claude": {
+        "label": "Claude (Anthropic)",
+        "ux": "Premium",
+        "model": "anthropic/claude-3-5-sonnet-20241022",
     },
     "deepseek": {
         "label": "DeepSeek R1",
@@ -304,6 +315,47 @@ def set_user_pref(
     get_user_prefs(context, user_id)[key] = value
 
 
+def get_llm_history(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    model_key: str,
+) -> list[dict]:
+    all_histories = context.bot_data.setdefault("llm_histories", {})
+    by_user = all_histories.setdefault(user_id, {})
+    history = by_user.setdefault(model_key, [])
+    return history
+
+
+def save_llm_turn(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    model_key: str,
+    user_message: str,
+    assistant_message: str,
+) -> None:
+    history = get_llm_history(context, user_id, model_key)
+    history.append({"role": "user", "content": user_message})
+    history.append({"role": "assistant", "content": assistant_message})
+    if len(history) > LLM_MAX_HISTORY_MESSAGES:
+        del history[: len(history) - LLM_MAX_HISTORY_MESSAGES]
+
+
+def clear_llm_history(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    model_key: Optional[str] = None,
+) -> int:
+    all_histories = context.bot_data.setdefault("llm_histories", {})
+    by_user = all_histories.setdefault(user_id, {})
+    if model_key:
+        removed = len(by_user.get(model_key, []))
+        by_user[model_key] = []
+        return removed
+    removed = sum(len(v) for v in by_user.values())
+    by_user.clear()
+    return removed
+
+
 def _selected_label(label: str, is_selected: bool) -> str:
     return f"✅ {label}" if is_selected else label
 
@@ -338,7 +390,8 @@ def help_text() -> str:
         "3) Choose aspect ratio\n\n"
         "LLM Chat (/llm)\n"
         "1) Choose model family\n"
-        "2) Ask your question\n\n"
+        "2) Ask your question (memory stays in this model thread)\n"
+        "Use /llmclear anytime to reset LLM memory\n\n"
         "Image-to-Video tools (/i2v)\n"
         "1) Choose model\n"
         "2) Upload source image\n"
@@ -499,6 +552,18 @@ def llm_model_keyboard(selected_key: str = "") -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     _model_button_text(LLM_MODELS["best"], selected_key == "best"),
                     callback_data="llm_model_best",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    _model_button_text(LLM_MODELS["chatgpt"], selected_key == "chatgpt"),
+                    callback_data="llm_model_chatgpt",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    _model_button_text(LLM_MODELS["claude"], selected_key == "claude"),
+                    callback_data="llm_model_claude",
                 )
             ],
             [
@@ -712,6 +777,18 @@ def fetch_result_v7(settings: Settings, request_id: str) -> dict:
 def call_modelslab_llm(settings: Settings, payload: dict) -> dict:
     model_key = str(payload["llm_model_key"])
     model_cfg = LLM_MODELS[model_key]
+    messages = payload.get("messages")
+    if not messages:
+        messages = [
+            {
+                "role": "system",
+                "content": "You are a helpful assistant. Give clear, practical answers.",
+            },
+            {
+                "role": "user",
+                "content": payload["prompt"],
+            },
+        ]
     response = requests.post(
         LLM_CHAT_API_URL,
         headers={
@@ -720,17 +797,8 @@ def call_modelslab_llm(settings: Settings, payload: dict) -> dict:
         },
         json={
             "model": model_cfg["model"],
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are a helpful assistant. Give clear, practical answers.",
-                },
-                {
-                    "role": "user",
-                    "content": payload["prompt"],
-                },
-            ],
-            "max_tokens": 700,
+            "messages": messages,
+            "max_tokens": payload.get("max_tokens", 700),
             "temperature": 0.7,
         },
         timeout=90,
@@ -1227,6 +1295,7 @@ async def llm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ConversationHandler.END
 
     last_model = get_user_pref(context, user_id, "llm_model_key", "best")
+    memory_messages = len(get_llm_history(context, user_id, last_model)) if last_model in LLM_MODELS else 0
     context.user_data.clear()
     await update.message.reply_text(
         "LLM Chat Step 1/2: Choose model."
@@ -1234,7 +1303,9 @@ async def llm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             f"\nLast used: {LLM_MODELS[last_model]['label']}"
             if last_model in LLM_MODELS
             else ""
-        ),
+        )
+        + (f"\nSaved memory: {memory_messages // 2} turns" if memory_messages else "")
+        + "\nTip: /llmclear resets memory.",
         reply_markup=llm_model_keyboard(last_model),
     )
     return WAITING_LLM_MODEL
@@ -1250,6 +1321,11 @@ async def llm_start_from_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
         return ConversationHandler.END
 
     last_model = get_user_pref(context, query.from_user.id, "llm_model_key", "best")
+    memory_messages = (
+        len(get_llm_history(context, query.from_user.id, last_model))
+        if last_model in LLM_MODELS
+        else 0
+    )
     context.user_data.clear()
     await query.edit_message_text(
         "LLM Chat Step 1/2: Choose model."
@@ -1257,7 +1333,9 @@ async def llm_start_from_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"\nLast used: {LLM_MODELS[last_model]['label']}"
             if last_model in LLM_MODELS
             else ""
-        ),
+        )
+        + (f"\nSaved memory: {memory_messages // 2} turns" if memory_messages else "")
+        + "\nTip: /llmclear resets memory.",
         reply_markup=llm_model_keyboard(last_model),
     )
     return WAITING_LLM_MODEL
@@ -1277,14 +1355,17 @@ async def receive_llm_model(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     set_user_pref(context, query.from_user.id, "llm_model_key", model_key)
     context.user_data["llm_model_key"] = model_key
+    turns = len(get_llm_history(context, query.from_user.id, model_key)) // 2
     await query.edit_message_text(
         f"LLM Chat Step 2/2: Ask your question for {LLM_MODELS[model_key]['label']}."
+        + (f"\nMemory loaded: {turns} turns." if turns else "")
     )
     return WAITING_LLM_PROMPT
 
 
 async def receive_llm_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     settings: Settings = context.bot_data["settings"]
+    user_id = update.effective_user.id
     prompt = update.message.text.strip()
     if not prompt:
         await update.message.reply_text("Prompt cannot be empty. Try again.")
@@ -1295,13 +1376,22 @@ async def receive_llm_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("Select model again with /llm.")
         return ConversationHandler.END
 
-    payload = {
-        "llm_model_key": model_key,
-        "prompt": prompt,
-    }
+    history = get_llm_history(context, user_id, model_key)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a helpful assistant. Maintain continuity using the prior conversation,"
+                " and keep answers practical and concise."
+            ),
+        },
+        *history,
+        {"role": "user", "content": prompt},
+    ]
+    payload = {"llm_model_key": model_key, "prompt": prompt, "messages": messages}
     status_message = await context.bot.send_message(
         chat_id=update.message.chat_id,
-        text=f"⏳ {LLM_MODELS[model_key]['label']}\nStatus: Thinking...",
+        text=f"⏳ {LLM_MODELS[model_key]['label']}\nStatus: Thinking with memory...",
     )
     try:
         data = await asyncio.to_thread(call_modelslab_llm, settings, payload)
@@ -1323,20 +1413,58 @@ async def receive_llm_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
             status_message,
             "✅ LLM reply ready.",
         )
+        save_llm_turn(
+            context,
+            user_id,
+            model_key,
+            truncate_text(prompt, 1200),
+            truncate_text(reply_text, 1200),
+        )
+        turns = len(get_llm_history(context, user_id, model_key)) // 2
         used_model = str(data.get("model") or LLM_MODELS[model_key]["model"])
         answer = truncate_text(reply_text, 3600)
         await context.bot.send_message(
             chat_id=update.message.chat_id,
-            text=f"🤖 {LLM_MODELS[model_key]['label']}\nModel: {used_model}\n\n{answer}",
+            text=(
+                f"🤖 {LLM_MODELS[model_key]['label']}\n"
+                f"Model: {used_model}\n"
+                f"Memory: {turns} turns\n\n{answer}"
+            ),
         )
-        return ConversationHandler.END
+        return WAITING_LLM_PROMPT
     except Exception as exc:  # noqa: BLE001
         logger.exception("LLM API call failed")
         await context.bot.send_message(
             chat_id=update.message.chat_id,
             text=f"LLM API error: {exc}",
         )
+        return WAITING_LLM_PROMPT
+
+
+async def llm_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    user = update.effective_user
+    if not user:
         return ConversationHandler.END
+    if not is_verified(user.id, settings):
+        if update.message:
+            await update.message.reply_text("Send /start and pass access code first.")
+        return ConversationHandler.END
+
+    model_key = str(context.user_data.get("llm_model_key", "")).strip()
+    if model_key in LLM_MODELS:
+        removed = clear_llm_history(context, user.id, model_key=model_key)
+        if update.message:
+            await update.message.reply_text(
+                f"Cleared {removed // 2} turns for {LLM_MODELS[model_key]['label']}."
+            )
+    else:
+        removed = clear_llm_history(context, user.id, model_key=None)
+        if update.message:
+            await update.message.reply_text(
+                f"Cleared all LLM memory ({removed // 2} turns)."
+            )
+    return WAITING_LLM_PROMPT
 
 
 async def t2i_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2939,8 +3067,9 @@ def main() -> None:
             WAITING_LLM_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_llm_prompt)],
         },
         fallbacks=[
+            CommandHandler("llmclear", llm_clear),
+            CommandHandler("newchat", llm_clear),
             CommandHandler("cancel", cancel),
-            MessageHandler(filters.ALL, fallback_msg),
         ],
         allow_reentry=True,
     )
@@ -3013,6 +3142,8 @@ def main() -> None:
     app.add_handler(auth_conv)
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("llmclear", llm_clear))
+    app.add_handler(CommandHandler("newchat", llm_clear))
     app.add_handler(
         CallbackQueryHandler(
             result_action_callback,

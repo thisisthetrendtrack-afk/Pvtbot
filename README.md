@@ -41,6 +41,8 @@ bash start.sh
 - `/help` - usage instructions
 - `/llm` - LLM chat flow (best model selector)
 - `/chat` - alias of `/llm`
+- `/llmclear` - clear saved LLM conversation memory
+- `/newchat` - alias of `/llmclear`
 - `/t2i` - Nano Banana 2 text-to-image flow
 - `/text2image` - alias of `/t2i`
 - `/imgedit` - Nano Banana 2 image-edit flow
@@ -82,12 +84,17 @@ The bot also includes generation UX improvements:
 1. Send `/llm` (or choose **LLM Chat** in menu)
 2. Choose LLM family:
    - Best Available (Auto)
+   - ChatGPT (OpenAI)
+   - Claude (Anthropic)
    - DeepSeek R1
    - Meta Llama 3.1 70B
    - Qwen 2.5 72B
    - Mistral 8x7B
 3. Send your question/prompt
 4. Bot calls ModelsLab chat-completions endpoint and returns the reply
+5. Conversation memory is saved per user + model for continuity
+6. Use `/llmclear` to reset memory at any time
+7. Memory is kept in bot runtime (clears when bot restarts)
 
 ## Best LLMs on ModelsLab (recommended)
 
@@ -97,6 +104,8 @@ From ModelsLab LLM categories, these are strong picks:
 - **Qwen family** - strong coding and multilingual quality
 - **Mistral family** - fast and efficient
 - **Best Available (Auto)** - simplest default for most users
+- **ChatGPT (OpenAI)** - strong general assistant quality
+- **Claude (Anthropic)** - strong writing and long-context behavior
 
 ## Text-to-image flow (`/t2i`)
 

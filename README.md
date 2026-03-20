@@ -37,11 +37,21 @@ bash start.sh
 ## Bot commands
 
 - `/start` - begin session (and access-code check if enabled)
+- `/menu` - open professional feature menu
 - `/help` - usage instructions
 - `/generate` - Kling 3.0 motion-control flow
 - `/ltx` - LTX 2.3 text-to-video flow
 - `/generate_ltx` - alias of `/ltx`
 - `/cancel` - cancel current flow
+
+## Main menu
+
+The bot now opens with a professional inline menu containing:
+- **Text to Image**
+- **Text to Video**
+- **Image to Video**
+
+Text-to-video and image-to-video options are connected to working ModelsLab flows.
 
 ## Kling generation flow (`/generate`)
 

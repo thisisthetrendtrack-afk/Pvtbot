@@ -36,6 +36,7 @@ LTX_API_URL = "https://modelslab.com/api/v6/video/text2video_ultra"
 LTX_FETCH_URL_TEMPLATE = "https://modelslab.com/api/v6/video/fetch/{request_id}"
 LTX_MODEL_ID = "ltx-2.3"
 LTX_RESOLUTIONS = ("1:1", "16:9", "9:16")
+MENU_BACK_CALLBACK = "menu_back"
 
 (
     WAITING_CODE,
@@ -130,13 +131,9 @@ def is_verified(user_id: int, settings: Settings) -> bool:
 
 def menu_text() -> str:
     return (
-        "Access granted.\n\n"
-        "ModelsLab Video Bot\n"
-        "Commands:\n"
-        "/generate - Kling 3.0 motion control (image + motion video)\n"
-        "/ltx - LTX 2.3 text-to-video\n"
-        "/help - How to use\n"
-        "/cancel - Cancel current session"
+        "ModelsLab AI Studio\n"
+        "Professional generation menu\n\n"
+        "Choose one workflow:"
     )
 
 
@@ -150,8 +147,60 @@ def help_text() -> str:
         "LTX 2.3 Text-to-Video (/ltx)\n"
         "1) Enter prompt\n"
         "2) Choose aspect ratio (1:1 / 16:9 / 9:16)\n\n"
+        "Open main menu anytime with /menu\n\n"
         "The bot sends your request to ModelsLab and returns the generated video."
     )
+
+
+def main_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🖼 Text to Image", callback_data="menu_t2i")],
+            [InlineKeyboardButton("🎬 Text to Video", callback_data="menu_t2v")],
+            [InlineKeyboardButton("🧷 Image to Video", callback_data="menu_i2v")],
+        ]
+    )
+
+
+def text_to_video_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("LTX 2.3 (Text to Video)", callback_data="menu_start_ltx")],
+            [InlineKeyboardButton("⬅ Back", callback_data=MENU_BACK_CALLBACK)],
+        ]
+    )
+
+
+def image_to_video_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "Kling 3.0 Motion Control", callback_data="menu_start_kling"
+                )
+            ],
+            [InlineKeyboardButton("⬅ Back", callback_data=MENU_BACK_CALLBACK)],
+        ]
+    )
+
+
+def back_only_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("⬅ Back", callback_data=MENU_BACK_CALLBACK)]]
+    )
+
+
+async def send_main_menu(update: Update) -> None:
+    if update.message:
+        await update.message.reply_text(
+            menu_text(),
+            reply_markup=main_menu_keyboard(),
+        )
+    elif update.callback_query:
+        await update.callback_query.edit_message_text(
+            menu_text(),
+            reply_markup=main_menu_keyboard(),
+        )
 
 
 def call_modelslab_kling(settings: Settings, payload: dict) -> dict:
@@ -242,7 +291,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
 
     if is_verified(user_id, settings):
-        await update.message.reply_text(menu_text())
+        await send_main_menu(update)
         return ConversationHandler.END
 
     await update.message.reply_text("This bot is private. Enter access code:")
@@ -253,7 +302,7 @@ async def check_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     settings: Settings = context.bot_data["settings"]
     if update.message.text.strip() == settings.access_code:
         VERIFIED_USERS.add(update.effective_user.id)
-        await update.message.reply_text(menu_text())
+        await send_main_menu(update)
         return ConversationHandler.END
 
     await update.message.reply_text("Wrong access code. Try again.")
@@ -268,6 +317,49 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(help_text())
 
 
+async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings: Settings = context.bot_data["settings"]
+    if not is_verified(update.effective_user.id, settings):
+        await update.message.reply_text("Send /start and pass access code first.")
+        return
+    await send_main_menu(update)
+
+
+async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings: Settings = context.bot_data["settings"]
+    query = update.callback_query
+    await query.answer()
+
+    if not is_verified(query.from_user.id, settings):
+        await query.edit_message_text("Access required. Send /start first.")
+        return
+
+    data = query.data
+    if data == "menu_t2i":
+        await query.edit_message_text(
+            "🖼 Text to Image\n\nThis module is coming soon.",
+            reply_markup=back_only_keyboard(),
+        )
+        return
+
+    if data == "menu_t2v":
+        await query.edit_message_text(
+            "🎬 Text to Video\n\nChoose a model:",
+            reply_markup=text_to_video_keyboard(),
+        )
+        return
+
+    if data == "menu_i2v":
+        await query.edit_message_text(
+            "🧷 Image to Video\n\nChoose a model:",
+            reply_markup=image_to_video_keyboard(),
+        )
+        return
+
+    if data == MENU_BACK_CALLBACK:
+        await send_main_menu(update)
+
+
 async def generate_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     settings: Settings = context.bot_data["settings"]
     if not is_verified(update.effective_user.id, settings):
@@ -277,6 +369,24 @@ async def generate_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.user_data.clear()
     await update.message.reply_text(
         "Step 1/3: Send character image (JPG/PNG)."
+    )
+    return WAITING_IMAGE
+
+
+async def generate_start_from_menu(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    settings: Settings = context.bot_data["settings"]
+    query = update.callback_query
+    await query.answer()
+
+    if not is_verified(query.from_user.id, settings):
+        await query.edit_message_text("Access required. Send /start first.")
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    await query.edit_message_text(
+        "Kling 3.0 Motion Control\n\nStep 1/3: Send character image (JPG/PNG)."
     )
     return WAITING_IMAGE
 
@@ -393,6 +503,20 @@ async def ltx_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return WAITING_LTX_PROMPT
 
 
+async def ltx_start_from_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    query = update.callback_query
+    await query.answer()
+
+    if not is_verified(query.from_user.id, settings):
+        await query.edit_message_text("Access required. Send /start first.")
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    await query.edit_message_text("LTX 2.3 Step 1/2: Enter your prompt text.")
+    return WAITING_LTX_PROMPT
+
+
 async def receive_ltx_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     prompt = update.message.text.strip()
     if not prompt:
@@ -504,12 +628,12 @@ async def send_video_result(
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
-    await update.message.reply_text("Cancelled. Send /generate to start again.")
+    await update.message.reply_text("Cancelled. Open /menu to start again.")
     return ConversationHandler.END
 
 
 async def fallback_msg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("Follow the steps or send /cancel.")
+    await update.message.reply_text("Follow the steps, or send /cancel and reopen /menu.")
 
 
 def main() -> None:
@@ -538,7 +662,10 @@ def main() -> None:
     )
 
     gen_conv = ConversationHandler(
-        entry_points=[CommandHandler("generate", generate_start)],
+        entry_points=[
+            CommandHandler("generate", generate_start),
+            CallbackQueryHandler(generate_start_from_menu, pattern=r"^menu_start_kling$"),
+        ],
         states={
             WAITING_IMAGE: [MessageHandler(filters.PHOTO | filters.Document.ALL, receive_image)],
             WAITING_VIDEO: [MessageHandler(filters.VIDEO | filters.Document.ALL, receive_video)],
@@ -555,6 +682,7 @@ def main() -> None:
         entry_points=[
             CommandHandler("ltx", ltx_start),
             CommandHandler("generate_ltx", ltx_start),
+            CallbackQueryHandler(ltx_start_from_menu, pattern=r"^menu_start_ltx$"),
         ],
         states={
             WAITING_LTX_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_ltx_prompt)],
@@ -568,7 +696,9 @@ def main() -> None:
     )
 
     app.add_handler(auth_conv)
+    app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^menu_(t2i|t2v|i2v|back)$"))
     app.add_handler(gen_conv)
     app.add_handler(ltx_conv)
 

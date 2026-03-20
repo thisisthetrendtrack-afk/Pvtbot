@@ -97,6 +97,35 @@ SORA_ASPECT_RATIOS = {
 SORA_DURATIONS = ("4", "8", "12")
 MENU_BACK_CALLBACK = "menu_back"
 
+LLM_CHAT_API_URL = "https://modelslab.com/api/uncensored-chat/v1/chat/completions"
+LLM_MODELS = {
+    "best": {
+        "label": "Best Available (Auto)",
+        "ux": "Recommended",
+        "model": "ModelsLab/Llama-3.1-8b-Uncensored-Dare",
+    },
+    "deepseek": {
+        "label": "DeepSeek R1",
+        "ux": "Reasoning",
+        "model": "deepseek-ai/DeepSeek-R1",
+    },
+    "llama": {
+        "label": "Meta Llama 3.1 70B",
+        "ux": "Balanced",
+        "model": "meta-llama/Meta-Llama-3.1-70B-Instruct",
+    },
+    "qwen": {
+        "label": "Qwen 2.5 72B",
+        "ux": "Coding",
+        "model": "Qwen/Qwen2.5-72B-Instruct",
+    },
+    "mistral": {
+        "label": "Mistral 8x7B",
+        "ux": "Fast",
+        "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+    },
+}
+
 T2I_API_URL = "https://modelslab.com/api/v7/images/text-to-image"
 T2I_MODEL_ID = "gemini-3.1-t2i"
 T2I_ASPECT_RATIOS = (
@@ -164,7 +193,9 @@ I2I_MODE_REFERENCE = "reference"
     WAITING_I2I_IMAGE,
     WAITING_I2I_PROMPT,
     WAITING_I2I_ASPECT_RATIO,
-) = range(21)
+    WAITING_LLM_MODEL,
+    WAITING_LLM_PROMPT,
+) = range(23)
 
 VERIFIED_USERS: set[int] = set()
 RERUN_CALLBACK_PREFIX = "regen_"
@@ -305,6 +336,9 @@ def help_text() -> str:
         "1) Upload source image\n"
         "2) Enter prompt to keep style/identity\n"
         "3) Choose aspect ratio\n\n"
+        "LLM Chat (/llm)\n"
+        "1) Choose model family\n"
+        "2) Ask your question\n\n"
         "Image-to-Video tools (/i2v)\n"
         "1) Choose model\n"
         "2) Upload source image\n"
@@ -334,6 +368,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("🖼 Text to Image (Nano Banana 2)", callback_data="menu_t2i")],
+            [InlineKeyboardButton("💬 LLM Chat", callback_data="menu_llm")],
             [InlineKeyboardButton("🪄 Image Edit (Nano Banana 2)", callback_data="menu_i2i")],
             [InlineKeyboardButton("🧭 Reference Image Generate", callback_data="menu_refimg")],
             [InlineKeyboardButton("🎬 Text to Video", callback_data="menu_t2v")],
@@ -450,6 +485,44 @@ def t2i_model_keyboard(selected_key: str = "") -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     _model_button_text(T2I_MODELS["seedream"], selected_key == "seedream"),
                     callback_data="t2i_model_seedream",
+                )
+            ],
+            [InlineKeyboardButton("⬅ Back", callback_data=MENU_BACK_CALLBACK)],
+        ]
+    )
+
+
+def llm_model_keyboard(selected_key: str = "") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    _model_button_text(LLM_MODELS["best"], selected_key == "best"),
+                    callback_data="llm_model_best",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    _model_button_text(LLM_MODELS["deepseek"], selected_key == "deepseek"),
+                    callback_data="llm_model_deepseek",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    _model_button_text(LLM_MODELS["llama"], selected_key == "llama"),
+                    callback_data="llm_model_llama",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    _model_button_text(LLM_MODELS["qwen"], selected_key == "qwen"),
+                    callback_data="llm_model_qwen",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    _model_button_text(LLM_MODELS["mistral"], selected_key == "mistral"),
+                    callback_data="llm_model_mistral",
                 )
             ],
             [InlineKeyboardButton("⬅ Back", callback_data=MENU_BACK_CALLBACK)],
@@ -631,6 +704,36 @@ def fetch_result_v7(settings: Settings, request_id: str) -> dict:
         KLING_FETCH_URL_TEMPLATE.format(request_id=request_id),
         json={"key": settings.modelslab_api_key},
         timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def call_modelslab_llm(settings: Settings, payload: dict) -> dict:
+    model_key = str(payload["llm_model_key"])
+    model_cfg = LLM_MODELS[model_key]
+    response = requests.post(
+        LLM_CHAT_API_URL,
+        headers={
+            "Authorization": f"Bearer {settings.modelslab_api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model_cfg["model"],
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant. Give clear, practical answers.",
+                },
+                {
+                    "role": "user",
+                    "content": payload["prompt"],
+                },
+            ],
+            "max_tokens": 700,
+            "temperature": 0.7,
+        },
+        timeout=90,
     )
     response.raise_for_status()
     return response.json()
@@ -1098,6 +1201,142 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if data == MENU_BACK_CALLBACK:
         await send_main_menu(update)
+
+
+def extract_llm_reply(data: dict) -> str:
+    choices = data.get("choices") or []
+    if choices:
+        message = choices[0].get("message") or {}
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+        reasoning = message.get("reasoning_content")
+        if isinstance(reasoning, str) and reasoning.strip():
+            return reasoning.strip()
+    msg = data.get("message")
+    if isinstance(msg, str) and msg.strip():
+        return msg.strip()
+    return ""
+
+
+async def llm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    user_id = update.effective_user.id
+    if not is_verified(user_id, settings):
+        await update.message.reply_text("Send /start and pass access code first.")
+        return ConversationHandler.END
+
+    last_model = get_user_pref(context, user_id, "llm_model_key", "best")
+    context.user_data.clear()
+    await update.message.reply_text(
+        "LLM Chat Step 1/2: Choose model."
+        + (
+            f"\nLast used: {LLM_MODELS[last_model]['label']}"
+            if last_model in LLM_MODELS
+            else ""
+        ),
+        reply_markup=llm_model_keyboard(last_model),
+    )
+    return WAITING_LLM_MODEL
+
+
+async def llm_start_from_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    query = update.callback_query
+    await query.answer()
+
+    if not is_verified(query.from_user.id, settings):
+        await query.edit_message_text("Access required. Send /start first.")
+        return ConversationHandler.END
+
+    last_model = get_user_pref(context, query.from_user.id, "llm_model_key", "best")
+    context.user_data.clear()
+    await query.edit_message_text(
+        "LLM Chat Step 1/2: Choose model."
+        + (
+            f"\nLast used: {LLM_MODELS[last_model]['label']}"
+            if last_model in LLM_MODELS
+            else ""
+        ),
+        reply_markup=llm_model_keyboard(last_model),
+    )
+    return WAITING_LLM_MODEL
+
+
+async def receive_llm_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    if query.data == MENU_BACK_CALLBACK:
+        await send_main_menu(update)
+        return ConversationHandler.END
+
+    model_key = query.data.replace("llm_model_", "", 1)
+    if model_key not in LLM_MODELS:
+        await query.edit_message_text("Unsupported LLM model. Send /llm to start again.")
+        return ConversationHandler.END
+
+    set_user_pref(context, query.from_user.id, "llm_model_key", model_key)
+    context.user_data["llm_model_key"] = model_key
+    await query.edit_message_text(
+        f"LLM Chat Step 2/2: Ask your question for {LLM_MODELS[model_key]['label']}."
+    )
+    return WAITING_LLM_PROMPT
+
+
+async def receive_llm_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    prompt = update.message.text.strip()
+    if not prompt:
+        await update.message.reply_text("Prompt cannot be empty. Try again.")
+        return WAITING_LLM_PROMPT
+
+    model_key = str(context.user_data.get("llm_model_key", "best"))
+    if model_key not in LLM_MODELS:
+        await update.message.reply_text("Select model again with /llm.")
+        return ConversationHandler.END
+
+    payload = {
+        "llm_model_key": model_key,
+        "prompt": prompt,
+    }
+    status_message = await context.bot.send_message(
+        chat_id=update.message.chat_id,
+        text=f"⏳ {LLM_MODELS[model_key]['label']}\nStatus: Thinking...",
+    )
+    try:
+        data = await asyncio.to_thread(call_modelslab_llm, settings, payload)
+        reply_text = extract_llm_reply(data)
+        if not reply_text:
+            await finalize_progress_message(
+                context,
+                status_message,
+                "❌ LLM reply failed.",
+            )
+            await context.bot.send_message(
+                chat_id=update.message.chat_id,
+                text=f"LLM API error: {data.get('message') or data}",
+            )
+            return ConversationHandler.END
+
+        await finalize_progress_message(
+            context,
+            status_message,
+            "✅ LLM reply ready.",
+        )
+        used_model = str(data.get("model") or LLM_MODELS[model_key]["model"])
+        answer = truncate_text(reply_text, 3600)
+        await context.bot.send_message(
+            chat_id=update.message.chat_id,
+            text=f"🤖 {LLM_MODELS[model_key]['label']}\nModel: {used_model}\n\n{answer}",
+        )
+        return ConversationHandler.END
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("LLM API call failed")
+        await context.bot.send_message(
+            chat_id=update.message.chat_id,
+            text=f"LLM API error: {exc}",
+        )
+        return ConversationHandler.END
 
 
 async def t2i_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2687,6 +2926,25 @@ def main() -> None:
         allow_reentry=True,
     )
 
+    llm_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("llm", llm_start),
+            CommandHandler("chat", llm_start),
+            CallbackQueryHandler(llm_start_from_menu, pattern=r"^menu_llm$"),
+        ],
+        states={
+            WAITING_LLM_MODEL: [
+                CallbackQueryHandler(receive_llm_model, pattern=r"^(llm_model_|menu_back)")
+            ],
+            WAITING_LLM_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_llm_prompt)],
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            MessageHandler(filters.ALL, fallback_msg),
+        ],
+        allow_reentry=True,
+    )
+
     t2i_conv = ConversationHandler(
         entry_points=[
             CommandHandler("t2i", t2i_start),
@@ -2762,6 +3020,7 @@ def main() -> None:
         )
     )
     app.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^menu_(t2v|i2v|back)$"))
+    app.add_handler(llm_conv)
     app.add_handler(t2i_conv)
     app.add_handler(i2v_conv)
     app.add_handler(i2i_conv)

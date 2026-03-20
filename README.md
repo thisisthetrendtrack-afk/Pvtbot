@@ -39,6 +39,8 @@ bash start.sh
 - `/start` - begin session (and access-code check if enabled)
 - `/menu` - open professional feature menu
 - `/help` - usage instructions
+- `/llm` - LLM chat flow (best model selector)
+- `/chat` - alias of `/llm`
 - `/t2i` - Nano Banana 2 text-to-image flow
 - `/text2image` - alias of `/t2i`
 - `/imgedit` - Nano Banana 2 image-edit flow
@@ -59,6 +61,7 @@ bash start.sh
 
 The bot now opens with a professional inline menu containing:
 - **Text to Image**
+- **LLM Chat**
 - **Image Edit**
 - **Reference Image Generate**
 - **Text to Video**
@@ -73,6 +76,27 @@ The bot also includes generation UX improvements:
 - **Regenerate** and **Variation** buttons on every result (image/video)
 - **Remember last settings** per user (last model, aspect ratio, duration)
 - Menus now show model speed/quality hints (Fast / Balanced / Highest quality)
+
+## LLM chat flow (`/llm`)
+
+1. Send `/llm` (or choose **LLM Chat** in menu)
+2. Choose LLM family:
+   - Best Available (Auto)
+   - DeepSeek R1
+   - Meta Llama 3.1 70B
+   - Qwen 2.5 72B
+   - Mistral 8x7B
+3. Send your question/prompt
+4. Bot calls ModelsLab chat-completions endpoint and returns the reply
+
+## Best LLMs on ModelsLab (recommended)
+
+From ModelsLab LLM categories, these are strong picks:
+- **DeepSeek R1** - strong reasoning
+- **Meta Llama 3/4 family** - balanced quality and reliability
+- **Qwen family** - strong coding and multilingual quality
+- **Mistral family** - fast and efficient
+- **Best Available (Auto)** - simplest default for most users
 
 ## Text-to-image flow (`/t2i`)
 

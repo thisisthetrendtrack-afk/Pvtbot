@@ -39,6 +39,8 @@ bash start.sh
 - `/start` - begin session (and access-code check if enabled)
 - `/menu` - open professional feature menu
 - `/help` - usage instructions
+- `/t2i` - Nano Banana 2 text-to-image flow
+- `/text2image` - alias of `/t2i`
 - `/generate` - Kling 3.0 motion-control flow
 - `/ltx` - LTX 2.3 text-to-video flow
 - `/generate_ltx` - alias of `/ltx`
@@ -51,7 +53,15 @@ The bot now opens with a professional inline menu containing:
 - **Text to Video**
 - **Image to Video**
 
-Text-to-video and image-to-video options are connected to working ModelsLab flows.
+All three options are connected to working ModelsLab flows.
+
+## Text-to-image flow (`/t2i`)
+
+1. Send `/t2i` (or choose **Text to Image** in menu)
+2. Enter text prompt
+3. Choose aspect ratio
+4. Bot calls Nano Banana 2 endpoint (`v7/images/text-to-image`)
+5. Bot sends generated image
 
 ## Kling generation flow (`/generate`)
 

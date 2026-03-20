@@ -40,6 +40,21 @@ LTX_MODEL_ID = "ltx-2.3"
 LTX_RESOLUTIONS = ("1:1", "16:9", "9:16")
 MENU_BACK_CALLBACK = "menu_back"
 
+T2I_API_URL = "https://modelslab.com/api/v7/images/text-to-image"
+T2I_MODEL_ID = "gemini-3.1-t2i"
+T2I_ASPECT_RATIOS = (
+    "1:1",
+    "9:16",
+    "2:3",
+    "3:4",
+    "4:5",
+    "5:4",
+    "4:3",
+    "3:2",
+    "16:9",
+    "21:9",
+)
+
 (
     WAITING_CODE,
     WAITING_IMAGE,
@@ -47,7 +62,9 @@ MENU_BACK_CALLBACK = "menu_back"
     WAITING_PROMPT,
     WAITING_LTX_PROMPT,
     WAITING_LTX_RESOLUTION,
-) = range(6)
+    WAITING_T2I_PROMPT,
+    WAITING_T2I_ASPECT_RATIO,
+) = range(8)
 
 VERIFIED_USERS: set[int] = set()
 
@@ -142,6 +159,9 @@ def menu_text() -> str:
 def help_text() -> str:
     return (
         "How it works:\n\n"
+        "Nano Banana 2 Text-to-Image (/t2i)\n"
+        "1) Enter prompt\n"
+        "2) Choose aspect ratio\n\n"
         "Kling Motion Control (/generate)\n"
         "1) Upload character image (PNG/JPG)\n"
         "2) Upload reference motion video (MP4/MOV)\n"
@@ -157,7 +177,7 @@ def help_text() -> str:
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("🖼 Text to Image", callback_data="menu_t2i")],
+            [InlineKeyboardButton("🖼 Text to Image (Nano Banana 2)", callback_data="menu_t2i")],
             [InlineKeyboardButton("🎬 Text to Video", callback_data="menu_t2v")],
             [InlineKeyboardButton("🧷 Image to Video", callback_data="menu_i2v")],
         ]
@@ -241,6 +261,22 @@ def call_modelslab_ltx(settings: Settings, payload: dict) -> dict:
     return response.json()
 
 
+def call_modelslab_t2i(settings: Settings, payload: dict) -> dict:
+    response = requests.post(
+        T2I_API_URL,
+        json={
+            "key": settings.modelslab_api_key,
+            "prompt": payload["prompt"],
+            "model_id": T2I_MODEL_ID,
+            "aspect_ratio": payload["aspect_ratio"],
+            "track_id": None,
+        },
+        timeout=60,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
 def fetch_result_v7(settings: Settings, request_id: str) -> dict:
     response = requests.post(
         KLING_FETCH_URL_TEMPLATE.format(request_id=request_id),
@@ -261,6 +297,38 @@ def fetch_result_v6(settings: Settings, request_id: str) -> dict:
     return response.json()
 
 
+def fetch_result_t2i(settings: Settings, request_id: str) -> dict:
+    """Try common fetch endpoints used by ModelsLab image APIs."""
+    endpoints = (
+        (
+            f"https://modelslab.com/api/v7/images/fetch/{request_id}",
+            {"key": settings.modelslab_api_key},
+        ),
+        (
+            "https://modelslab.com/api/v6/images/fetch",
+            {"key": settings.modelslab_api_key, "request_id": request_id},
+        ),
+        (
+            f"https://modelslab.com/api/v6/images/fetch/{request_id}",
+            {"key": settings.modelslab_api_key},
+        ),
+    )
+
+    last_error: Optional[Exception] = None
+    for endpoint, body in endpoints:
+        try:
+            response = requests.post(endpoint, json=body, timeout=30)
+            if response.status_code >= 400:
+                continue
+            return response.json()
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+
+    raise RuntimeError(
+        "Failed to fetch image result from known endpoints"
+    ) from last_error
+
+
 async def poll_result(
     settings: Settings,
     request_id: str,
@@ -270,7 +338,13 @@ async def poll_result(
 ) -> Optional[str]:
     deadline = time.time() + max_wait
     while time.time() < deadline:
-        data = await asyncio.to_thread(fetch_fn, settings, request_id)
+        try:
+            data = await asyncio.to_thread(fetch_fn, settings, request_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Fetch polling error: %s", exc)
+            await asyncio.sleep(poll_interval)
+            continue
+
         status = str(data.get("status", "")).lower()
         if status == "success":
             output = data.get("output") or []
@@ -337,13 +411,6 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     data = query.data
-    if data == "menu_t2i":
-        await query.edit_message_text(
-            "🖼 Text to Image\n\nThis module is coming soon.",
-            reply_markup=back_only_keyboard(),
-        )
-        return
-
     if data == "menu_t2v":
         await query.edit_message_text(
             "🎬 Text to Video\n\nChoose a model:",
@@ -360,6 +427,125 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if data == MENU_BACK_CALLBACK:
         await send_main_menu(update)
+
+
+async def t2i_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    if not is_verified(update.effective_user.id, settings):
+        await update.message.reply_text("Send /start and pass access code first.")
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    await update.message.reply_text("Text to Image Step 1/2: Enter your prompt text.")
+    return WAITING_T2I_PROMPT
+
+
+async def t2i_start_from_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    query = update.callback_query
+    await query.answer()
+
+    if not is_verified(query.from_user.id, settings):
+        await query.edit_message_text("Access required. Send /start first.")
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    await query.edit_message_text("Text to Image Step 1/2: Enter your prompt text.")
+    return WAITING_T2I_PROMPT
+
+
+async def receive_t2i_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    prompt = update.message.text.strip()
+    if not prompt:
+        await update.message.reply_text("Prompt cannot be empty. Try again.")
+        return WAITING_T2I_PROMPT
+
+    context.user_data["prompt"] = prompt
+    keyboard = [
+        [
+            InlineKeyboardButton("1:1", callback_data="t2i_ar_1:1"),
+            InlineKeyboardButton("16:9", callback_data="t2i_ar_16:9"),
+            InlineKeyboardButton("9:16", callback_data="t2i_ar_9:16"),
+        ],
+        [
+            InlineKeyboardButton("4:5", callback_data="t2i_ar_4:5"),
+            InlineKeyboardButton("3:4", callback_data="t2i_ar_3:4"),
+            InlineKeyboardButton("2:3", callback_data="t2i_ar_2:3"),
+        ],
+    ]
+    await update.message.reply_text(
+        "Text to Image Step 2/2: Choose aspect ratio.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return WAITING_T2I_ASPECT_RATIO
+
+
+async def receive_t2i_aspect_ratio(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    settings: Settings = context.bot_data["settings"]
+    query = update.callback_query
+    await query.answer()
+
+    aspect_ratio = query.data.replace("t2i_ar_", "", 1)
+    if aspect_ratio not in T2I_ASPECT_RATIOS:
+        await query.edit_message_text("Unsupported aspect ratio. Send /t2i to start again.")
+        return ConversationHandler.END
+
+    context.user_data["aspect_ratio"] = aspect_ratio
+    await query.edit_message_text("Generating image with Nano Banana 2. Please wait...")
+
+    payload = dict(context.user_data)
+    try:
+        created = await asyncio.to_thread(call_modelslab_t2i, settings, payload)
+        if str(created.get("status", "")).lower() == "success":
+            output = created.get("output") or []
+            if output:
+                await send_image_result(
+                    context,
+                    query.message.chat_id,
+                    output[0],
+                    payload,
+                    model_name=f"Nano Banana 2 ({aspect_ratio})",
+                )
+                return ConversationHandler.END
+
+        request_id = created.get("id") or created.get("request_id")
+        if not request_id:
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"Unexpected ModelsLab response: {created}",
+            )
+            return ConversationHandler.END
+
+        image_url = await poll_result(
+            settings,
+            request_id=request_id,
+            fetch_fn=fetch_result_t2i,
+            max_wait=240,
+        )
+        if not image_url:
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="Image generation failed or timed out. Please try /t2i again.",
+            )
+            return ConversationHandler.END
+
+        await send_image_result(
+            context,
+            query.message.chat_id,
+            image_url,
+            payload,
+            model_name=f"Nano Banana 2 ({aspect_ratio})",
+        )
+        return ConversationHandler.END
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("T2I API call failed")
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=f"Text-to-image API error: {exc}",
+        )
+        return ConversationHandler.END
 
 
 async def generate_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -675,6 +861,45 @@ def download_video_to_tempfile(video_url: str) -> str:
         return temp_file.name
 
 
+async def send_image_result(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    image_url: str,
+    payload: dict,
+    model_name: str,
+) -> None:
+    caption = (
+        "Image is ready.\n"
+        f"Prompt: {payload.get('prompt', '')}\n"
+        f"Aspect Ratio: {payload.get('aspect_ratio', '?')}\n"
+        f"Model: {model_name}"
+    )
+    try:
+        await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=image_url,
+            caption=caption,
+        )
+        return
+    except Exception as photo_error:  # noqa: BLE001
+        logger.warning("Direct image URL send failed: %s", photo_error)
+
+    try:
+        await context.bot.send_document(
+            chat_id=chat_id,
+            document=image_url,
+            caption=caption,
+        )
+        return
+    except Exception as document_error:  # noqa: BLE001
+        logger.warning("Document image fallback failed: %s", document_error)
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"Image ready: {image_url}\n\n{caption}",
+    )
+
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
     await update.message.reply_text("Cancelled. Open /menu to start again.")
@@ -744,10 +969,30 @@ def main() -> None:
         allow_reentry=True,
     )
 
+    t2i_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("t2i", t2i_start),
+            CommandHandler("text2image", t2i_start),
+            CallbackQueryHandler(t2i_start_from_menu, pattern=r"^menu_t2i$"),
+        ],
+        states={
+            WAITING_T2I_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_t2i_prompt)],
+            WAITING_T2I_ASPECT_RATIO: [
+                CallbackQueryHandler(receive_t2i_aspect_ratio, pattern=r"^t2i_ar_")
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            MessageHandler(filters.ALL, fallback_msg),
+        ],
+        allow_reentry=True,
+    )
+
     app.add_handler(auth_conv)
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^menu_(t2i|t2v|i2v|back)$"))
+    app.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^menu_(t2v|i2v|back)$"))
+    app.add_handler(t2i_conv)
     app.add_handler(gen_conv)
     app.add_handler(ltx_conv)
 

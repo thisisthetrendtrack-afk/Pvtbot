@@ -58,6 +58,9 @@ The bot now opens with a professional inline menu containing:
 
 All options are connected to working ModelsLab flows.
 
+Each generation flow now shows live progress updates in chat
+(Submitted, Processing, Retrying, Completed/Failed with elapsed time).
+
 ## Text-to-image flow (`/t2i`)
 
 1. Send `/t2i` (or choose **Text to Image** in menu)

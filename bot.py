@@ -7,7 +7,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Awaitable, Callable, Optional
 from urllib.parse import urlparse
 
 import requests
@@ -361,19 +361,28 @@ async def poll_result(
     settings: Settings,
     request_id: str,
     fetch_fn: Callable[[Settings, str], dict],
+    progress_callback: Optional[Callable[[int, str], Awaitable[None]]] = None,
     poll_interval: int = 10,
     max_wait: int = 420,
 ) -> Optional[str]:
     deadline = time.time() + max_wait
+    started_at = time.time()
     while time.time() < deadline:
         try:
             data = await asyncio.to_thread(fetch_fn, settings, request_id)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Fetch polling error: %s", exc)
+            if progress_callback:
+                elapsed = int(time.time() - started_at)
+                await progress_callback(elapsed, "retrying")
             await asyncio.sleep(poll_interval)
             continue
 
         status = str(data.get("status", "")).lower()
+        if progress_callback:
+            elapsed = int(time.time() - started_at)
+            await progress_callback(elapsed, status or "processing")
+
         if status == "success":
             output = data.get("output") or []
             return output[0] if output else None
@@ -382,6 +391,68 @@ async def poll_result(
             return None
         await asyncio.sleep(poll_interval)
     return None
+
+
+def _humanize_status(raw_status: str) -> str:
+    mapping = {
+        "processing": "Processing",
+        "pending": "Pending",
+        "queued": "Queued",
+        "in progress": "In Progress",
+        "in_progress": "In Progress",
+        "retrying": "Retrying",
+        "success": "Completed",
+    }
+    normalized = raw_status.strip().lower()
+    if normalized in mapping:
+        return mapping[normalized]
+    if not normalized:
+        return "Processing"
+    return normalized.replace("_", " ").title()
+
+
+def make_progress_callback(
+    context: ContextTypes.DEFAULT_TYPE,
+    status_message,
+    job_title: str,
+) -> Callable[[int, str], Awaitable[None]]:
+    state = {"last_text": ""}
+
+    async def _progress(elapsed_seconds: int, status: str) -> None:
+        text = (
+            f"⏳ {job_title}\n"
+            f"Status: {_humanize_status(status)}\n"
+            f"Elapsed: {elapsed_seconds}s"
+        )
+        if text == state["last_text"]:
+            return
+        try:
+            await context.bot.edit_message_text(
+                chat_id=status_message.chat_id,
+                message_id=status_message.message_id,
+                text=text,
+            )
+            state["last_text"] = text
+        except Exception:  # noqa: BLE001
+            # Message may be unchanged/expired; do not break generation flow.
+            pass
+
+    return _progress
+
+
+async def finalize_progress_message(
+    context: ContextTypes.DEFAULT_TYPE,
+    status_message,
+    final_text: str,
+) -> None:
+    try:
+        await context.bot.edit_message_text(
+            chat_id=status_message.chat_id,
+            message_id=status_message.message_id,
+            text=final_text,
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def telegram_file_url(settings: Settings, file_path: str) -> str:
@@ -524,11 +595,25 @@ async def receive_t2i_aspect_ratio(
     await query.edit_message_text("Generating image with Nano Banana 2. Please wait...")
 
     payload = dict(context.user_data)
+    status_message = await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text="⏳ Nano Banana 2 Text-to-Image\nStatus: Submitted\nElapsed: 0s",
+    )
+    progress_callback = make_progress_callback(
+        context=context,
+        status_message=status_message,
+        job_title="Nano Banana 2 Text-to-Image",
+    )
     try:
         created = await asyncio.to_thread(call_modelslab_t2i, settings, payload)
         if str(created.get("status", "")).lower() == "success":
             output = created.get("output") or []
             if output:
+                await finalize_progress_message(
+                    context,
+                    status_message,
+                    "✅ Text-to-image completed. Sending image...",
+                )
                 await send_image_result(
                     context,
                     query.message.chat_id,
@@ -550,15 +635,26 @@ async def receive_t2i_aspect_ratio(
             settings,
             request_id=request_id,
             fetch_fn=fetch_result_t2i,
+            progress_callback=progress_callback,
             max_wait=240,
         )
         if not image_url:
+            await finalize_progress_message(
+                context,
+                status_message,
+                "❌ Text-to-image failed or timed out.",
+            )
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
                 text="Image generation failed or timed out. Please try /t2i again.",
             )
             return ConversationHandler.END
 
+        await finalize_progress_message(
+            context,
+            status_message,
+            "✅ Text-to-image completed. Sending image...",
+        )
         await send_image_result(
             context,
             query.message.chat_id,
@@ -663,11 +759,25 @@ async def receive_i2i_aspect_ratio(
     await query.edit_message_text("Editing image with Nano Banana 2. Please wait...")
 
     payload = dict(context.user_data)
+    status_message = await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text="⏳ Nano Banana 2 Image Edit\nStatus: Submitted\nElapsed: 0s",
+    )
+    progress_callback = make_progress_callback(
+        context=context,
+        status_message=status_message,
+        job_title="Nano Banana 2 Image Edit",
+    )
     try:
         created = await asyncio.to_thread(call_modelslab_i2i, settings, payload)
         if str(created.get("status", "")).lower() == "success":
             output = created.get("output") or []
             if output:
+                await finalize_progress_message(
+                    context,
+                    status_message,
+                    "✅ Image edit completed. Sending image...",
+                )
                 await send_image_result(
                     context,
                     query.message.chat_id,
@@ -689,15 +799,26 @@ async def receive_i2i_aspect_ratio(
             settings,
             request_id=request_id,
             fetch_fn=fetch_result_t2i,
+            progress_callback=progress_callback,
             max_wait=240,
         )
         if not image_url:
+            await finalize_progress_message(
+                context,
+                status_message,
+                "❌ Image edit failed or timed out.",
+            )
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
                 text="Image edit failed or timed out. Please try /imgedit again.",
             )
             return ConversationHandler.END
 
+        await finalize_progress_message(
+            context,
+            status_message,
+            "✅ Image edit completed. Sending image...",
+        )
         await send_image_result(
             context,
             query.message.chat_id,
@@ -796,11 +917,25 @@ async def receive_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text("Generating video with ModelsLab. Please wait...")
 
     payload = dict(context.user_data)
+    status_message = await context.bot.send_message(
+        chat_id=update.message.chat_id,
+        text="⏳ Kling 3.0 Motion Control\nStatus: Submitted\nElapsed: 0s",
+    )
+    progress_callback = make_progress_callback(
+        context=context,
+        status_message=status_message,
+        job_title="Kling 3.0 Motion Control",
+    )
     try:
         created = await asyncio.to_thread(call_modelslab_kling, settings, payload)
         if str(created.get("status", "")).lower() == "success":
             output = created.get("output") or []
             if output:
+                await finalize_progress_message(
+                    context,
+                    status_message,
+                    "✅ Kling 3.0 completed. Sending video...",
+                )
                 await send_video_result(
                     context,
                     update.message.chat_id,
@@ -822,14 +957,25 @@ async def receive_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             settings,
             request_id=request_id,
             fetch_fn=fetch_result_v7,
+            progress_callback=progress_callback,
         )
         if not video_url:
+            await finalize_progress_message(
+                context,
+                status_message,
+                "❌ Kling 3.0 failed or timed out.",
+            )
             await context.bot.send_message(
                 chat_id=update.message.chat_id,
                 text="Generation failed or timed out. Please try /generate again.",
             )
             return ConversationHandler.END
 
+        await finalize_progress_message(
+            context,
+            status_message,
+            "✅ Kling 3.0 completed. Sending video...",
+        )
         await send_video_result(
             context,
             update.message.chat_id,
@@ -905,11 +1051,25 @@ async def receive_ltx_resolution(update: Update, context: ContextTypes.DEFAULT_T
     await query.edit_message_text("Generating LTX 2.3 video. Please wait...")
 
     payload = dict(context.user_data)
+    status_message = await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text="⏳ LTX 2.3 Text-to-Video\nStatus: Submitted\nElapsed: 0s",
+    )
+    progress_callback = make_progress_callback(
+        context=context,
+        status_message=status_message,
+        job_title="LTX 2.3 Text-to-Video",
+    )
     try:
         created = await asyncio.to_thread(call_modelslab_ltx, settings, payload)
         if str(created.get("status", "")).lower() == "success":
             output = created.get("output") or []
             if output:
+                await finalize_progress_message(
+                    context,
+                    status_message,
+                    "✅ LTX completed. Sending video...",
+                )
                 await send_video_result(
                     context,
                     query.message.chat_id,
@@ -931,14 +1091,25 @@ async def receive_ltx_resolution(update: Update, context: ContextTypes.DEFAULT_T
             settings,
             request_id=request_id,
             fetch_fn=fetch_result_v6,
+            progress_callback=progress_callback,
         )
         if not video_url:
+            await finalize_progress_message(
+                context,
+                status_message,
+                "❌ LTX failed or timed out.",
+            )
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
                 text="LTX generation failed or timed out. Please try /ltx again.",
             )
             return ConversationHandler.END
 
+        await finalize_progress_message(
+            context,
+            status_message,
+            "✅ LTX completed. Sending video...",
+        )
         await send_video_result(
             context,
             query.message.chat_id,

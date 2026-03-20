@@ -43,6 +43,8 @@ bash start.sh
 - `/text2image` - alias of `/t2i`
 - `/imgedit` - Nano Banana 2 image-edit flow
 - `/imageedit` - alias of `/imgedit`
+- `/refimg` - Nano Banana 2 reference-image generation flow
+- `/reference` - alias of `/refimg`
 - `/i2v` - image-to-video model toolkit (all available i2v models)
 - `/generate` - Kling 3.0 motion-control flow
 - `/ltx` - LTX 2.3 text-to-video flow
@@ -58,6 +60,7 @@ bash start.sh
 The bot now opens with a professional inline menu containing:
 - **Text to Image**
 - **Image Edit**
+- **Reference Image Generate**
 - **Text to Video**
 - **Image to Video**
 
@@ -90,6 +93,15 @@ The bot also includes generation UX improvements:
 4. Choose aspect ratio
 5. Bot calls Nano Banana 2 image-edit endpoint (`v7/images/image-to-image`)
 6. Bot sends edited image
+
+## Reference-image generation flow (`/refimg`)
+
+1. Send `/refimg` (or choose **Reference Image Generate** in menu)
+2. Upload source/reference image
+3. Enter prompt for what to generate while keeping style/identity
+4. Choose aspect ratio
+5. Bot calls Nano Banana 2 image-to-image endpoint (`v7/images/image-to-image`)
+6. Bot sends generated image
 
 ## Kling generation flow (`/generate`)
 

@@ -139,6 +139,8 @@ T2I_MODELS = {
 
 I2I_API_URL = "https://modelslab.com/api/v7/images/image-to-image"
 I2I_MODEL_ID = "gemini-3.1-i2i"
+I2I_MODE_EDIT = "edit"
+I2I_MODE_REFERENCE = "reference"
 
 (
     WAITING_CODE,
@@ -299,6 +301,10 @@ def help_text() -> str:
         "1) Upload source image\n"
         "2) Enter edit instruction prompt\n"
         "3) Choose aspect ratio\n\n"
+        "Reference Image Generate (/refimg)\n"
+        "1) Upload source image\n"
+        "2) Enter prompt to keep style/identity\n"
+        "3) Choose aspect ratio\n\n"
         "Image-to-Video tools (/i2v)\n"
         "1) Choose model\n"
         "2) Upload source image\n"
@@ -329,6 +335,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("🖼 Text to Image (Nano Banana 2)", callback_data="menu_t2i")],
             [InlineKeyboardButton("🪄 Image Edit (Nano Banana 2)", callback_data="menu_i2i")],
+            [InlineKeyboardButton("🧭 Reference Image Generate", callback_data="menu_refimg")],
             [InlineKeyboardButton("🎬 Text to Video", callback_data="menu_t2v")],
             [InlineKeyboardButton("🧷 Image to Video", callback_data="menu_i2v")],
         ]
@@ -454,6 +461,14 @@ def back_only_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton("⬅ Back", callback_data=MENU_BACK_CALLBACK)]]
     )
+
+
+def i2i_mode_title(mode: str) -> str:
+    return "Reference Image Generate" if mode == I2I_MODE_REFERENCE else "Image Edit"
+
+
+def i2i_retry_command(mode: str) -> str:
+    return "/refimg" if mode == I2I_MODE_REFERENCE else "/imgedit"
 
 
 async def send_main_menu(update: Update) -> None:
@@ -861,11 +876,17 @@ def generation_config_from_task(task_type: str, payload: dict) -> dict:
             "max_wait": 240,
         }
     if task_type == "i2i":
+        mode = str(payload.get("i2i_mode", I2I_MODE_EDIT))
+        job_title = (
+            "Nano Banana 2 Reference Image Generate"
+            if mode == I2I_MODE_REFERENCE
+            else "Nano Banana 2 Image Edit"
+        )
         return {
             "call": call_modelslab_i2i,
             "fetch": fetch_result_t2i,
             "kind": "image",
-            "job_title": "Nano Banana 2 Image Edit",
+            "job_title": job_title,
             "max_wait": 240,
         }
     if task_type == "i2v":
@@ -1486,8 +1507,9 @@ async def imgedit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
     last_ratio = get_user_pref(context, user_id, "i2i_aspect_ratio")
     context.user_data.clear()
+    context.user_data["i2i_mode"] = I2I_MODE_EDIT
     await update.message.reply_text(
-        "Image Edit Step 1/3: Send source image (JPG/PNG)."
+        f"{i2i_mode_title(I2I_MODE_EDIT)} Step 1/3: Send source image (JPG/PNG)."
         + (f"\nLast ratio: {last_ratio}" if last_ratio else "")
     )
     return WAITING_I2I_IMAGE
@@ -1506,8 +1528,45 @@ async def imgedit_start_from_menu(
 
     last_ratio = get_user_pref(context, query.from_user.id, "i2i_aspect_ratio")
     context.user_data.clear()
+    context.user_data["i2i_mode"] = I2I_MODE_EDIT
     await query.edit_message_text(
-        "Image Edit Step 1/3: Send source image (JPG/PNG)."
+        f"{i2i_mode_title(I2I_MODE_EDIT)} Step 1/3: Send source image (JPG/PNG)."
+        + (f"\nLast ratio: {last_ratio}" if last_ratio else "")
+    )
+    return WAITING_I2I_IMAGE
+
+
+async def refimg_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    user_id = update.effective_user.id
+    if not is_verified(user_id, settings):
+        await update.message.reply_text("Send /start and pass access code first.")
+        return ConversationHandler.END
+
+    last_ratio = get_user_pref(context, user_id, "i2i_aspect_ratio")
+    context.user_data.clear()
+    context.user_data["i2i_mode"] = I2I_MODE_REFERENCE
+    await update.message.reply_text(
+        f"{i2i_mode_title(I2I_MODE_REFERENCE)} Step 1/3: Send source image (JPG/PNG)."
+        + (f"\nLast ratio: {last_ratio}" if last_ratio else "")
+    )
+    return WAITING_I2I_IMAGE
+
+
+async def refimg_start_from_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    query = update.callback_query
+    await query.answer()
+
+    if not is_verified(query.from_user.id, settings):
+        await query.edit_message_text("Access required. Send /start first.")
+        return ConversationHandler.END
+
+    last_ratio = get_user_pref(context, query.from_user.id, "i2i_aspect_ratio")
+    context.user_data.clear()
+    context.user_data["i2i_mode"] = I2I_MODE_REFERENCE
+    await query.edit_message_text(
+        f"{i2i_mode_title(I2I_MODE_REFERENCE)} Step 1/3: Send source image (JPG/PNG)."
         + (f"\nLast ratio: {last_ratio}" if last_ratio else "")
     )
     return WAITING_I2I_IMAGE
@@ -1525,9 +1584,15 @@ async def receive_i2i_image(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text("Please send a JPG/PNG image.")
         return WAITING_I2I_IMAGE
 
+    mode = str(context.user_data.get("i2i_mode", I2I_MODE_EDIT))
     tg_file = await context.bot.get_file(image_file.file_id)
     context.user_data["init_image"] = [telegram_file_url(settings, tg_file.file_path)]
-    await update.message.reply_text("Image Edit Step 2/3: Enter edit instruction prompt.")
+    step_text = (
+        "Step 2/3: Enter prompt to keep style/identity from this reference image."
+        if mode == I2I_MODE_REFERENCE
+        else "Step 2/3: Enter edit instruction prompt."
+    )
+    await update.message.reply_text(f"{i2i_mode_title(mode)} {step_text}")
     return WAITING_I2I_PROMPT
 
 
@@ -1537,6 +1602,7 @@ async def receive_i2i_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("Prompt cannot be empty. Try again.")
         return WAITING_I2I_PROMPT
 
+    mode = str(context.user_data.get("i2i_mode", I2I_MODE_EDIT))
     context.user_data["prompt"] = prompt
     last_ratio = get_user_pref(context, update.effective_user.id, "i2i_aspect_ratio", "1:1")
     keyboard = [
@@ -1552,7 +1618,7 @@ async def receive_i2i_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
         ],
     ]
     await update.message.reply_text(
-        "Image Edit Step 3/3: Choose aspect ratio. (✅ = last used)",
+        f"{i2i_mode_title(mode)} Step 3/3: Choose aspect ratio. (✅ = last used)",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
     return WAITING_I2I_ASPECT_RATIO
@@ -1565,24 +1631,48 @@ async def receive_i2i_aspect_ratio(
     query = update.callback_query
     await query.answer()
 
+    mode = str(context.user_data.get("i2i_mode", I2I_MODE_EDIT))
     aspect_ratio = query.data.replace("i2i_ar_", "", 1)
     if aspect_ratio not in T2I_ASPECT_RATIOS:
-        await query.edit_message_text("Unsupported aspect ratio. Send /imgedit to start again.")
+        await query.edit_message_text(
+            f"Unsupported aspect ratio. Send {i2i_retry_command(mode)} to start again."
+        )
         return ConversationHandler.END
 
     context.user_data["aspect_ratio"] = aspect_ratio
     set_user_pref(context, query.from_user.id, "i2i_aspect_ratio", aspect_ratio)
-    await query.edit_message_text("Editing image with Nano Banana 2. Please wait...")
+    run_label = (
+        "Generating from reference image with Nano Banana 2"
+        if mode == I2I_MODE_REFERENCE
+        else "Editing image with Nano Banana 2"
+    )
+    await query.edit_message_text(f"{run_label}. Please wait...")
 
     payload = dict(context.user_data)
+    job_title = (
+        "Nano Banana 2 Reference Image Generate"
+        if mode == I2I_MODE_REFERENCE
+        else "Nano Banana 2 Image Edit"
+    )
+    result_model_name = f"{job_title} ({aspect_ratio})"
+    success_msg = (
+        "✅ Reference generation completed. Sending image..."
+        if mode == I2I_MODE_REFERENCE
+        else "✅ Image edit completed. Sending image..."
+    )
+    fail_msg = (
+        "Reference generation failed or timed out."
+        if mode == I2I_MODE_REFERENCE
+        else "Image edit failed or timed out."
+    )
     status_message = await context.bot.send_message(
         chat_id=query.message.chat_id,
-        text="⏳ Nano Banana 2 Image Edit\nStatus: Submitted\nElapsed: 0s",
+        text=f"⏳ {job_title}\nStatus: Submitted\nElapsed: 0s",
     )
     progress_callback = make_progress_callback(
         context=context,
         status_message=status_message,
-        job_title="Nano Banana 2 Image Edit",
+        job_title=job_title,
     )
     try:
         created = await asyncio.to_thread(call_modelslab_i2i, settings, payload)
@@ -1592,14 +1682,14 @@ async def receive_i2i_aspect_ratio(
                 await finalize_progress_message(
                     context,
                     status_message,
-                    "✅ Image edit completed. Sending image...",
+                    success_msg,
                 )
                 await send_image_result(
                     context,
                     query.message.chat_id,
                     output[0],
                     payload,
-                    model_name=f"Nano Banana 2 Image Edit ({aspect_ratio})",
+                    model_name=result_model_name,
                     user_id=query.from_user.id,
                     task_type="i2i",
                 )
@@ -1624,25 +1714,25 @@ async def receive_i2i_aspect_ratio(
             await finalize_progress_message(
                 context,
                 status_message,
-                "❌ Image edit failed or timed out.",
+                f"❌ {fail_msg}",
             )
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
-                text="Image edit failed or timed out. Please try /imgedit again.",
+                text=f"{fail_msg} Please try {i2i_retry_command(mode)} again.",
             )
             return ConversationHandler.END
 
         await finalize_progress_message(
             context,
             status_message,
-            "✅ Image edit completed. Sending image...",
+            success_msg,
         )
         await send_image_result(
             context,
             query.message.chat_id,
             image_url,
             payload,
-            model_name=f"Nano Banana 2 Image Edit ({aspect_ratio})",
+            model_name=result_model_name,
             user_id=query.from_user.id,
             task_type="i2i",
         )
@@ -1651,7 +1741,7 @@ async def receive_i2i_aspect_ratio(
         logger.exception("Image edit API call failed")
         await context.bot.send_message(
             chat_id=query.message.chat_id,
-            text=f"Image edit API error: {exc}",
+            text=f"{i2i_mode_title(mode)} API error: {exc}",
         )
         return ConversationHandler.END
 
@@ -2643,7 +2733,10 @@ def main() -> None:
         entry_points=[
             CommandHandler("imgedit", imgedit_start),
             CommandHandler("imageedit", imgedit_start),
+            CommandHandler("refimg", refimg_start),
+            CommandHandler("reference", refimg_start),
             CallbackQueryHandler(imgedit_start_from_menu, pattern=r"^menu_i2i$"),
+            CallbackQueryHandler(refimg_start_from_menu, pattern=r"^menu_refimg$"),
         ],
         states={
             WAITING_I2I_IMAGE: [MessageHandler(filters.PHOTO | filters.Document.ALL, receive_i2i_image)],

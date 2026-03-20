@@ -38,10 +38,12 @@ bash start.sh
 
 - `/start` - begin session (and access-code check if enabled)
 - `/help` - usage instructions
-- `/generate` - start media-to-video flow
+- `/generate` - Kling 3.0 motion-control flow
+- `/ltx` - LTX 2.3 text-to-video flow
+- `/generate_ltx` - alias of `/ltx`
 - `/cancel` - cancel current flow
 
-## Generation flow
+## Kling generation flow (`/generate`)
 
 1. Send `/generate`
 2. Upload JPG/PNG image
@@ -50,3 +52,11 @@ bash start.sh
 5. Bot sends request to ModelsLab v7 motion-control endpoint
 6. Bot polls fetch endpoint until completion
 7. Bot sends the output video when generation succeeds
+
+## LTX generation flow (`/ltx`)
+
+1. Send `/ltx`
+2. Enter text prompt
+3. Choose aspect ratio (`1:1`, `16:9`, `9:16`)
+4. Bot sends request to ModelsLab `v6/video/text2video_ultra` with `model_id=ltx-2.3`
+5. Bot polls fetch endpoint and returns video when ready

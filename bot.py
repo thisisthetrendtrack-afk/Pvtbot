@@ -6,12 +6,13 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import requests
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     ConversationHandler,
@@ -26,17 +27,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-API_URL = "https://modelslab.com/api/v7/video-fusion/motion-control"
-FETCH_URL_TEMPLATE = "https://modelslab.com/api/v7/video-fusion/fetch/{request_id}"
-MODEL_ID = "kling-v3-motion-control"
-CHARACTER_ORIENTATION = "image"
+KLING_API_URL = "https://modelslab.com/api/v7/video-fusion/motion-control"
+KLING_FETCH_URL_TEMPLATE = "https://modelslab.com/api/v7/video-fusion/fetch/{request_id}"
+KLING_MODEL_ID = "kling-v3-motion-control"
+KLING_CHARACTER_ORIENTATION = "image"
+
+LTX_API_URL = "https://modelslab.com/api/v6/video/text2video_ultra"
+LTX_FETCH_URL_TEMPLATE = "https://modelslab.com/api/v6/video/fetch/{request_id}"
+LTX_MODEL_ID = "ltx-2.3"
+LTX_RESOLUTIONS = ("1:1", "16:9", "9:16")
 
 (
     WAITING_CODE,
     WAITING_IMAGE,
     WAITING_VIDEO,
     WAITING_PROMPT,
-) = range(4)
+    WAITING_LTX_PROMPT,
+    WAITING_LTX_RESOLUTION,
+) = range(6)
 
 VERIFIED_USERS: set[int] = set()
 
@@ -123,9 +131,10 @@ def is_verified(user_id: int, settings: Settings) -> bool:
 def menu_text() -> str:
     return (
         "Access granted.\n\n"
-        "Kling Motion Control Bot\n"
+        "ModelsLab Video Bot\n"
         "Commands:\n"
-        "/generate - Start a new generation\n"
+        "/generate - Kling 3.0 motion control (image + motion video)\n"
+        "/ltx - LTX 2.3 text-to-video\n"
         "/help - How to use\n"
         "/cancel - Cancel current session"
     )
@@ -134,24 +143,27 @@ def menu_text() -> str:
 def help_text() -> str:
     return (
         "How it works:\n\n"
-        "1) Send /generate\n"
-        "2) Upload character image (PNG or JPG)\n"
-        "3) Upload reference motion video (MP4/MOV)\n"
-        "4) Enter scene prompt\n\n"
-        "The bot sends the request to ModelsLab and returns the generated video."
+        "Kling Motion Control (/generate)\n"
+        "1) Upload character image (PNG/JPG)\n"
+        "2) Upload reference motion video (MP4/MOV)\n"
+        "3) Enter prompt\n\n"
+        "LTX 2.3 Text-to-Video (/ltx)\n"
+        "1) Enter prompt\n"
+        "2) Choose aspect ratio (1:1 / 16:9 / 9:16)\n\n"
+        "The bot sends your request to ModelsLab and returns the generated video."
     )
 
 
-def call_modelslab(settings: Settings, payload: dict) -> dict:
+def call_modelslab_kling(settings: Settings, payload: dict) -> dict:
     response = requests.post(
-        API_URL,
+        KLING_API_URL,
         json={
             "key": settings.modelslab_api_key,
             "prompt": payload["prompt"],
             "init_image": payload["image_url"],
             "init_video": payload["video_url"],
-            "character_orientation": CHARACTER_ORIENTATION,
-            "model_id": MODEL_ID,
+            "character_orientation": KLING_CHARACTER_ORIENTATION,
+            "model_id": KLING_MODEL_ID,
             "track_id": None,
         },
         timeout=60,
@@ -160,9 +172,37 @@ def call_modelslab(settings: Settings, payload: dict) -> dict:
     return response.json()
 
 
-def fetch_result(settings: Settings, request_id: str) -> dict:
+def call_modelslab_ltx(settings: Settings, payload: dict) -> dict:
     response = requests.post(
-        FETCH_URL_TEMPLATE.format(request_id=request_id),
+        LTX_API_URL,
+        json={
+            "key": settings.modelslab_api_key,
+            "prompt": payload["prompt"],
+            "model_id": LTX_MODEL_ID,
+            "resolution": payload["resolution"],
+            "negative_prompt": payload.get("negative_prompt", ""),
+            "webhook": None,
+            "track_id": None,
+        },
+        timeout=60,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def fetch_result_v7(settings: Settings, request_id: str) -> dict:
+    response = requests.post(
+        KLING_FETCH_URL_TEMPLATE.format(request_id=request_id),
+        json={"key": settings.modelslab_api_key},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def fetch_result_v6(settings: Settings, request_id: str) -> dict:
+    response = requests.post(
+        LTX_FETCH_URL_TEMPLATE.format(request_id=request_id),
         json={"key": settings.modelslab_api_key},
         timeout=30,
     )
@@ -173,12 +213,13 @@ def fetch_result(settings: Settings, request_id: str) -> dict:
 async def poll_result(
     settings: Settings,
     request_id: str,
+    fetch_fn: Callable[[Settings, str], dict],
     poll_interval: int = 10,
     max_wait: int = 420,
 ) -> Optional[str]:
     deadline = time.time() + max_wait
     while time.time() < deadline:
-        data = await asyncio.to_thread(fetch_result, settings, request_id)
+        data = await asyncio.to_thread(fetch_fn, settings, request_id)
         status = str(data.get("status", "")).lower()
         if status == "success":
             output = data.get("output") or []
@@ -291,11 +332,17 @@ async def receive_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     payload = dict(context.user_data)
     try:
-        created = await asyncio.to_thread(call_modelslab, settings, payload)
+        created = await asyncio.to_thread(call_modelslab_kling, settings, payload)
         if str(created.get("status", "")).lower() == "success":
             output = created.get("output") or []
             if output:
-                await send_video_result(context, update.message.chat_id, output[0], payload)
+                await send_video_result(
+                    context,
+                    update.message.chat_id,
+                    output[0],
+                    payload,
+                    model_name="Kling 3.0 Motion Control",
+                )
                 return ConversationHandler.END
 
         request_id = created.get("id") or created.get("request_id")
@@ -306,7 +353,11 @@ async def receive_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
             return ConversationHandler.END
 
-        video_url = await poll_result(settings, request_id=request_id)
+        video_url = await poll_result(
+            settings,
+            request_id=request_id,
+            fetch_fn=fetch_result_v7,
+        )
         if not video_url:
             await context.bot.send_message(
                 chat_id=update.message.chat_id,
@@ -314,7 +365,13 @@ async def receive_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
             return ConversationHandler.END
 
-        await send_video_result(context, update.message.chat_id, video_url, payload)
+        await send_video_result(
+            context,
+            update.message.chat_id,
+            video_url,
+            payload,
+            model_name="Kling 3.0 Motion Control",
+        )
         return ConversationHandler.END
     except Exception as exc:  # noqa: BLE001
         logger.exception("ModelsLab call failed")
@@ -325,16 +382,112 @@ async def receive_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return ConversationHandler.END
 
 
+async def ltx_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    if not is_verified(update.effective_user.id, settings):
+        await update.message.reply_text("Send /start and pass access code first.")
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    await update.message.reply_text("LTX 2.3 Step 1/2: Enter your prompt text.")
+    return WAITING_LTX_PROMPT
+
+
+async def receive_ltx_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    prompt = update.message.text.strip()
+    if not prompt:
+        await update.message.reply_text("Prompt cannot be empty. Try again.")
+        return WAITING_LTX_PROMPT
+
+    context.user_data["prompt"] = prompt
+    keyboard = [[
+        InlineKeyboardButton("1:1", callback_data="ltx_res_1:1"),
+        InlineKeyboardButton("16:9", callback_data="ltx_res_16:9"),
+        InlineKeyboardButton("9:16", callback_data="ltx_res_9:16"),
+    ]]
+    await update.message.reply_text(
+        "LTX 2.3 Step 2/2: Choose aspect ratio.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return WAITING_LTX_RESOLUTION
+
+
+async def receive_ltx_resolution(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    query = update.callback_query
+    await query.answer()
+
+    resolution = query.data.replace("ltx_res_", "", 1)
+    if resolution not in LTX_RESOLUTIONS:
+        await query.edit_message_text("Unsupported ratio. Send /ltx to start again.")
+        return ConversationHandler.END
+
+    context.user_data["resolution"] = resolution
+    await query.edit_message_text("Generating LTX 2.3 video. Please wait...")
+
+    payload = dict(context.user_data)
+    try:
+        created = await asyncio.to_thread(call_modelslab_ltx, settings, payload)
+        if str(created.get("status", "")).lower() == "success":
+            output = created.get("output") or []
+            if output:
+                await send_video_result(
+                    context,
+                    query.message.chat_id,
+                    output[0],
+                    payload,
+                    model_name=f"LTX 2.3 ({resolution})",
+                )
+                return ConversationHandler.END
+
+        request_id = created.get("id") or created.get("request_id")
+        if not request_id:
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"Unexpected ModelsLab response: {created}",
+            )
+            return ConversationHandler.END
+
+        video_url = await poll_result(
+            settings,
+            request_id=request_id,
+            fetch_fn=fetch_result_v6,
+        )
+        if not video_url:
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="LTX generation failed or timed out. Please try /ltx again.",
+            )
+            return ConversationHandler.END
+
+        await send_video_result(
+            context,
+            query.message.chat_id,
+            video_url,
+            payload,
+            model_name=f"LTX 2.3 ({resolution})",
+        )
+        return ConversationHandler.END
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("LTX API call failed")
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=f"LTX API error: {exc}",
+        )
+        return ConversationHandler.END
+
+
 async def send_video_result(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
     video_url: str,
     payload: dict,
+    model_name: str,
 ) -> None:
     caption = (
         "Video is ready.\n"
         f"Prompt: {payload.get('prompt', '')}\n"
-        f"Model: {MODEL_ID}"
+        f"Model: {model_name}"
     )
     try:
         await context.bot.send_video(
@@ -398,9 +551,26 @@ def main() -> None:
         allow_reentry=True,
     )
 
+    ltx_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("ltx", ltx_start),
+            CommandHandler("generate_ltx", ltx_start),
+        ],
+        states={
+            WAITING_LTX_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_ltx_prompt)],
+            WAITING_LTX_RESOLUTION: [CallbackQueryHandler(receive_ltx_resolution, pattern=r"^ltx_res_")],
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            MessageHandler(filters.ALL, fallback_msg),
+        ],
+        allow_reentry=True,
+    )
+
     app.add_handler(auth_conv)
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(gen_conv)
+    app.add_handler(ltx_conv)
 
     logger.info("Bot started. Access code enabled: %s", settings.access_required)
     app.run_polling(drop_pending_updates=True)

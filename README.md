@@ -8,6 +8,10 @@ This repository contains a Telegram bot that collects an image, motion video, an
 - `MODELSLAB_API_KEY` (required): ModelsLab API key
 - `ACCESS_CODE` (optional): if set, users must pass this code after `/start`
 
+Accepted aliases:
+- Telegram token: `BOT_TOKEN`, `TELEGRAM_BOT_TOKEN`
+- ModelsLab key: `MODELSLAB_KEY`, `ML_API_KEY`
+
 ## Local run
 
 ```bash
@@ -21,6 +25,14 @@ export ACCESS_CODE="optional_private_code"
 
 python bot.py
 ```
+
+Alternative:
+
+```bash
+bash start.sh
+```
+
+`start.sh` auto-installs missing dependencies before booting the bot.
 
 ## Bot commands
 

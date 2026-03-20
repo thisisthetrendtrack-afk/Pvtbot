@@ -5,6 +5,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import requests
@@ -59,11 +60,60 @@ def _required_env(name: str) -> str:
     return value
 
 
+def _optional_env(*names: str, default: str = "") -> str:
+    for name in names:
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return default
+
+
+def _required_any_env(*names: str) -> str:
+    value = _optional_env(*names, default="")
+    if value:
+        return value
+    raise RuntimeError(
+        "Missing required environment variable. Set one of: "
+        + ", ".join(names)
+    )
+
+
+def load_dotenv(dotenv_path: str = ".env") -> None:
+    """Load KEY=VALUE lines from .env into process env if absent."""
+    path = Path(dotenv_path)
+    if not path.exists():
+        return
+
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("'").strip('"')
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
 def load_settings() -> Settings:
+    load_dotenv()
     return Settings(
-        telegram_token=_required_env("TELEGRAM_TOKEN"),
-        modelslab_api_key=_required_env("MODELSLAB_API_KEY"),
-        access_code=os.getenv("ACCESS_CODE", "").strip(),
+        telegram_token=_required_any_env(
+            "TELEGRAM_TOKEN",
+            "BOT_TOKEN",
+            "TELEGRAM_BOT_TOKEN",
+        ),
+        modelslab_api_key=_required_any_env(
+            "MODELSLAB_API_KEY",
+            "MODELSLAB_KEY",
+            "ML_API_KEY",
+        ),
+        access_code=_optional_env("ACCESS_CODE", default="").strip(),
     )
 
 
@@ -343,7 +393,16 @@ async def fallback_msg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 def main() -> None:
-    settings = load_settings()
+    try:
+        settings = load_settings()
+    except RuntimeError as exc:
+        logger.error("%s", exc)
+        logger.error(
+            "Set TELEGRAM_TOKEN (or BOT_TOKEN) and MODELSLAB_API_KEY "
+            "(or MODELSLAB_KEY). You can also put them in a .env file."
+        )
+        raise SystemExit(1) from exc
+
     app = Application.builder().token(settings.telegram_token).build()
     app.bot_data["settings"] = settings
 

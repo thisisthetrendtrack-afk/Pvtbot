@@ -19,8 +19,8 @@ level=logging.INFO,
 )
 logger = logging.getLogger(**name**)
 
-TELEGRAM_TOKEN    = os.environ[“TELEGRAM_TOKEN”]
-MODELSLAB_API_KEY = os.environ[“MODELSLAB_API_KEY”]
+TELEGRAM_TOKEN    = os.environ[“8783783821:AAG_pw_UfKl5wAL8IGpHC9fnHFMZatyC3eU”]
+MODELSLAB_API_KEY = os.environ[“DehOCA2JIkE0hpPD3cz54qPgt7z2PSMI2vF8621DTIFDqOE93R1rkZwTis7K”]
 ACCESS_CODE       = os.environ.get(“ACCESS_CODE”, “KLING2025”)
 
 (

@@ -55,6 +55,9 @@ T2I_ASPECT_RATIOS = (
     "21:9",
 )
 
+I2I_API_URL = "https://modelslab.com/api/v7/images/image-to-image"
+I2I_MODEL_ID = "gemini-3.1-i2i"
+
 (
     WAITING_CODE,
     WAITING_IMAGE,
@@ -64,7 +67,10 @@ T2I_ASPECT_RATIOS = (
     WAITING_LTX_RESOLUTION,
     WAITING_T2I_PROMPT,
     WAITING_T2I_ASPECT_RATIO,
-) = range(8)
+    WAITING_I2I_IMAGE,
+    WAITING_I2I_PROMPT,
+    WAITING_I2I_ASPECT_RATIO,
+) = range(11)
 
 VERIFIED_USERS: set[int] = set()
 
@@ -162,6 +168,10 @@ def help_text() -> str:
         "Nano Banana 2 Text-to-Image (/t2i)\n"
         "1) Enter prompt\n"
         "2) Choose aspect ratio\n\n"
+        "Nano Banana 2 Image Edit (/imgedit)\n"
+        "1) Upload source image\n"
+        "2) Enter edit instruction prompt\n"
+        "3) Choose aspect ratio\n\n"
         "Kling Motion Control (/generate)\n"
         "1) Upload character image (PNG/JPG)\n"
         "2) Upload reference motion video (MP4/MOV)\n"
@@ -178,6 +188,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("🖼 Text to Image (Nano Banana 2)", callback_data="menu_t2i")],
+            [InlineKeyboardButton("🪄 Image Edit (Nano Banana 2)", callback_data="menu_i2i")],
             [InlineKeyboardButton("🎬 Text to Video", callback_data="menu_t2v")],
             [InlineKeyboardButton("🧷 Image to Video", callback_data="menu_i2v")],
         ]
@@ -268,6 +279,23 @@ def call_modelslab_t2i(settings: Settings, payload: dict) -> dict:
             "key": settings.modelslab_api_key,
             "prompt": payload["prompt"],
             "model_id": T2I_MODEL_ID,
+            "aspect_ratio": payload["aspect_ratio"],
+            "track_id": None,
+        },
+        timeout=60,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def call_modelslab_i2i(settings: Settings, payload: dict) -> dict:
+    response = requests.post(
+        I2I_API_URL,
+        json={
+            "key": settings.modelslab_api_key,
+            "prompt": payload["prompt"],
+            "model_id": I2I_MODEL_ID,
+            "init_image": payload["init_image"],
             "aspect_ratio": payload["aspect_ratio"],
             "track_id": None,
         },
@@ -544,6 +572,145 @@ async def receive_t2i_aspect_ratio(
         await context.bot.send_message(
             chat_id=query.message.chat_id,
             text=f"Text-to-image API error: {exc}",
+        )
+        return ConversationHandler.END
+
+
+async def imgedit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    if not is_verified(update.effective_user.id, settings):
+        await update.message.reply_text("Send /start and pass access code first.")
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    await update.message.reply_text("Image Edit Step 1/3: Send source image (JPG/PNG).")
+    return WAITING_I2I_IMAGE
+
+
+async def imgedit_start_from_menu(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    settings: Settings = context.bot_data["settings"]
+    query = update.callback_query
+    await query.answer()
+
+    if not is_verified(query.from_user.id, settings):
+        await query.edit_message_text("Access required. Send /start first.")
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    await query.edit_message_text("Image Edit Step 1/3: Send source image (JPG/PNG).")
+    return WAITING_I2I_IMAGE
+
+
+async def receive_i2i_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    image_file = None
+    if update.message.photo:
+        image_file = update.message.photo[-1]
+    elif update.message.document and str(update.message.document.mime_type).startswith("image/"):
+        image_file = update.message.document
+
+    if image_file is None:
+        await update.message.reply_text("Please send a JPG/PNG image.")
+        return WAITING_I2I_IMAGE
+
+    tg_file = await context.bot.get_file(image_file.file_id)
+    context.user_data["init_image"] = [telegram_file_url(settings, tg_file.file_path)]
+    await update.message.reply_text("Image Edit Step 2/3: Enter edit instruction prompt.")
+    return WAITING_I2I_PROMPT
+
+
+async def receive_i2i_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    prompt = update.message.text.strip()
+    if not prompt:
+        await update.message.reply_text("Prompt cannot be empty. Try again.")
+        return WAITING_I2I_PROMPT
+
+    context.user_data["prompt"] = prompt
+    keyboard = [
+        [
+            InlineKeyboardButton("1:1", callback_data="i2i_ar_1:1"),
+            InlineKeyboardButton("16:9", callback_data="i2i_ar_16:9"),
+            InlineKeyboardButton("9:16", callback_data="i2i_ar_9:16"),
+        ],
+        [
+            InlineKeyboardButton("4:5", callback_data="i2i_ar_4:5"),
+            InlineKeyboardButton("3:4", callback_data="i2i_ar_3:4"),
+            InlineKeyboardButton("2:3", callback_data="i2i_ar_2:3"),
+        ],
+    ]
+    await update.message.reply_text(
+        "Image Edit Step 3/3: Choose aspect ratio.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return WAITING_I2I_ASPECT_RATIO
+
+
+async def receive_i2i_aspect_ratio(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    settings: Settings = context.bot_data["settings"]
+    query = update.callback_query
+    await query.answer()
+
+    aspect_ratio = query.data.replace("i2i_ar_", "", 1)
+    if aspect_ratio not in T2I_ASPECT_RATIOS:
+        await query.edit_message_text("Unsupported aspect ratio. Send /imgedit to start again.")
+        return ConversationHandler.END
+
+    context.user_data["aspect_ratio"] = aspect_ratio
+    await query.edit_message_text("Editing image with Nano Banana 2. Please wait...")
+
+    payload = dict(context.user_data)
+    try:
+        created = await asyncio.to_thread(call_modelslab_i2i, settings, payload)
+        if str(created.get("status", "")).lower() == "success":
+            output = created.get("output") or []
+            if output:
+                await send_image_result(
+                    context,
+                    query.message.chat_id,
+                    output[0],
+                    payload,
+                    model_name=f"Nano Banana 2 Image Edit ({aspect_ratio})",
+                )
+                return ConversationHandler.END
+
+        request_id = created.get("id") or created.get("request_id")
+        if not request_id:
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"Unexpected ModelsLab response: {created}",
+            )
+            return ConversationHandler.END
+
+        image_url = await poll_result(
+            settings,
+            request_id=request_id,
+            fetch_fn=fetch_result_t2i,
+            max_wait=240,
+        )
+        if not image_url:
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="Image edit failed or timed out. Please try /imgedit again.",
+            )
+            return ConversationHandler.END
+
+        await send_image_result(
+            context,
+            query.message.chat_id,
+            image_url,
+            payload,
+            model_name=f"Nano Banana 2 Image Edit ({aspect_ratio})",
+        )
+        return ConversationHandler.END
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Image edit API call failed")
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=f"Image edit API error: {exc}",
         )
         return ConversationHandler.END
 
@@ -988,11 +1155,32 @@ def main() -> None:
         allow_reentry=True,
     )
 
+    i2i_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("imgedit", imgedit_start),
+            CommandHandler("imageedit", imgedit_start),
+            CallbackQueryHandler(imgedit_start_from_menu, pattern=r"^menu_i2i$"),
+        ],
+        states={
+            WAITING_I2I_IMAGE: [MessageHandler(filters.PHOTO | filters.Document.ALL, receive_i2i_image)],
+            WAITING_I2I_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_i2i_prompt)],
+            WAITING_I2I_ASPECT_RATIO: [
+                CallbackQueryHandler(receive_i2i_aspect_ratio, pattern=r"^i2i_ar_")
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            MessageHandler(filters.ALL, fallback_msg),
+        ],
+        allow_reentry=True,
+    )
+
     app.add_handler(auth_conv)
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^menu_(t2v|i2v|back)$"))
     app.add_handler(t2i_conv)
+    app.add_handler(i2i_conv)
     app.add_handler(gen_conv)
     app.add_handler(ltx_conv)
 

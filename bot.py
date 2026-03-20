@@ -38,6 +38,14 @@ LTX_API_URL = "https://modelslab.com/api/v6/video/text2video_ultra"
 LTX_FETCH_URL_TEMPLATE = "https://modelslab.com/api/v6/video/fetch/{request_id}"
 LTX_MODEL_ID = "ltx-2.3"
 LTX_RESOLUTIONS = ("1:1", "16:9", "9:16")
+
+SORA_API_URL = "https://modelslab.com/api/v7/video-fusion/text-to-video"
+SORA_MODEL_ID = "sora-2-pro-t2v"
+SORA_ASPECT_RATIOS = {
+    "9:16": "720x1280",
+    "16:9": "1280x720",
+}
+SORA_DURATIONS = ("4", "8", "12")
 MENU_BACK_CALLBACK = "menu_back"
 
 T2I_API_URL = "https://modelslab.com/api/v7/images/text-to-image"
@@ -65,12 +73,15 @@ I2I_MODEL_ID = "gemini-3.1-i2i"
     WAITING_PROMPT,
     WAITING_LTX_PROMPT,
     WAITING_LTX_RESOLUTION,
+    WAITING_SORA_PROMPT,
+    WAITING_SORA_ASPECT_RATIO,
+    WAITING_SORA_DURATION,
     WAITING_T2I_PROMPT,
     WAITING_T2I_ASPECT_RATIO,
     WAITING_I2I_IMAGE,
     WAITING_I2I_PROMPT,
     WAITING_I2I_ASPECT_RATIO,
-) = range(11)
+) = range(14)
 
 VERIFIED_USERS: set[int] = set()
 
@@ -179,6 +190,10 @@ def help_text() -> str:
         "LTX 2.3 Text-to-Video (/ltx)\n"
         "1) Enter prompt\n"
         "2) Choose aspect ratio (1:1 / 16:9 / 9:16)\n\n"
+        "Sora 2 Pro Text-to-Video (/sora)\n"
+        "1) Enter prompt\n"
+        "2) Choose aspect ratio (9:16 / 16:9)\n"
+        "3) Choose duration (4s / 8s / 12s)\n\n"
         "Open main menu anytime with /menu\n\n"
         "The bot sends your request to ModelsLab and returns the generated video."
     )
@@ -199,6 +214,7 @@ def text_to_video_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("LTX 2.3 (Text to Video)", callback_data="menu_start_ltx")],
+            [InlineKeyboardButton("Sora 2 Pro (Text to Video)", callback_data="menu_start_sora")],
             [InlineKeyboardButton("⬅ Back", callback_data=MENU_BACK_CALLBACK)],
         ]
     )
@@ -264,6 +280,23 @@ def call_modelslab_ltx(settings: Settings, payload: dict) -> dict:
             "resolution": payload["resolution"],
             "negative_prompt": payload.get("negative_prompt", ""),
             "webhook": None,
+            "track_id": None,
+        },
+        timeout=60,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def call_modelslab_sora(settings: Settings, payload: dict) -> dict:
+    response = requests.post(
+        SORA_API_URL,
+        json={
+            "key": settings.modelslab_api_key,
+            "prompt": payload["prompt"],
+            "model_id": SORA_MODEL_ID,
+            "aspect_ratio": payload["aspect_ratio"],
+            "duration": payload["duration"],
             "track_id": None,
         },
         timeout=60,
@@ -1140,6 +1173,172 @@ async def receive_ltx_resolution(update: Update, context: ContextTypes.DEFAULT_T
         return ConversationHandler.END
 
 
+async def sora_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    if not is_verified(update.effective_user.id, settings):
+        await update.message.reply_text("Send /start and pass access code first.")
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    await update.message.reply_text("Sora 2 Pro Step 1/3: Enter your prompt text.")
+    return WAITING_SORA_PROMPT
+
+
+async def sora_start_from_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    query = update.callback_query
+    await query.answer()
+
+    if not is_verified(query.from_user.id, settings):
+        await query.edit_message_text("Access required. Send /start first.")
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    await query.edit_message_text("Sora 2 Pro Step 1/3: Enter your prompt text.")
+    return WAITING_SORA_PROMPT
+
+
+async def receive_sora_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    prompt = update.message.text.strip()
+    if not prompt:
+        await update.message.reply_text("Prompt cannot be empty. Try again.")
+        return WAITING_SORA_PROMPT
+
+    context.user_data["prompt"] = prompt
+    keyboard = [[
+        InlineKeyboardButton("9:16", callback_data="sora_ar_9x16"),
+        InlineKeyboardButton("16:9", callback_data="sora_ar_16x9"),
+    ]]
+    await update.message.reply_text(
+        "Sora 2 Pro Step 2/3: Choose aspect ratio.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return WAITING_SORA_ASPECT_RATIO
+
+
+async def receive_sora_aspect_ratio(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    query = update.callback_query
+    await query.answer()
+
+    token = query.data.replace("sora_ar_", "", 1)
+    if token == "9x16":
+        label = "9:16"
+    elif token == "16x9":
+        label = "16:9"
+    else:
+        await query.edit_message_text("Unsupported aspect ratio. Send /sora to start again.")
+        return ConversationHandler.END
+
+    context.user_data["aspect_ratio"] = SORA_ASPECT_RATIOS[label]
+    context.user_data["aspect_ratio_label"] = label
+
+    keyboard = [[
+        InlineKeyboardButton("4s", callback_data="sora_dur_4"),
+        InlineKeyboardButton("8s", callback_data="sora_dur_8"),
+        InlineKeyboardButton("12s", callback_data="sora_dur_12"),
+    ]]
+    await query.edit_message_text(
+        "Sora 2 Pro Step 3/3: Choose duration.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return WAITING_SORA_DURATION
+
+
+async def receive_sora_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    query = update.callback_query
+    await query.answer()
+
+    duration = query.data.replace("sora_dur_", "", 1)
+    if duration not in SORA_DURATIONS:
+        await query.edit_message_text("Unsupported duration. Send /sora to start again.")
+        return ConversationHandler.END
+
+    context.user_data["duration"] = duration
+    await query.edit_message_text("Generating Sora 2 Pro video. Please wait...")
+
+    payload = dict(context.user_data)
+    status_message = await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text="⏳ Sora 2 Pro Text-to-Video\nStatus: Submitted\nElapsed: 0s",
+    )
+    progress_callback = make_progress_callback(
+        context=context,
+        status_message=status_message,
+        job_title="Sora 2 Pro Text-to-Video",
+    )
+
+    try:
+        created = await asyncio.to_thread(call_modelslab_sora, settings, payload)
+        if str(created.get("status", "")).lower() == "success":
+            output = created.get("output") or []
+            if output:
+                await finalize_progress_message(
+                    context,
+                    status_message,
+                    "✅ Sora 2 Pro completed. Sending video...",
+                )
+                await send_video_result(
+                    context,
+                    query.message.chat_id,
+                    output[0],
+                    payload,
+                    model_name=(
+                        f"Sora 2 Pro ({payload.get('aspect_ratio_label', '?')}, {duration}s)"
+                    ),
+                )
+                return ConversationHandler.END
+
+        request_id = created.get("id") or created.get("request_id")
+        if not request_id:
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"Unexpected ModelsLab response: {created}",
+            )
+            return ConversationHandler.END
+
+        video_url = await poll_result(
+            settings,
+            request_id=request_id,
+            fetch_fn=fetch_result_v7,
+            progress_callback=progress_callback,
+        )
+        if not video_url:
+            await finalize_progress_message(
+                context,
+                status_message,
+                "❌ Sora 2 Pro failed or timed out.",
+            )
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="Sora generation failed or timed out. Please try /sora again.",
+            )
+            return ConversationHandler.END
+
+        await finalize_progress_message(
+            context,
+            status_message,
+            "✅ Sora 2 Pro completed. Sending video...",
+        )
+        await send_video_result(
+            context,
+            query.message.chat_id,
+            video_url,
+            payload,
+            model_name=f"Sora 2 Pro ({payload.get('aspect_ratio_label', '?')}, {duration}s)",
+        )
+        return ConversationHandler.END
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Sora API call failed")
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=f"Sora API error: {exc}",
+        )
+        return ConversationHandler.END
+
+
 async def send_video_result(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
@@ -1324,6 +1523,28 @@ def main() -> None:
         allow_reentry=True,
     )
 
+    sora_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("sora", sora_start),
+            CommandHandler("sora2", sora_start),
+            CallbackQueryHandler(sora_start_from_menu, pattern=r"^menu_start_sora$"),
+        ],
+        states={
+            WAITING_SORA_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_sora_prompt)],
+            WAITING_SORA_ASPECT_RATIO: [
+                CallbackQueryHandler(receive_sora_aspect_ratio, pattern=r"^sora_ar_")
+            ],
+            WAITING_SORA_DURATION: [
+                CallbackQueryHandler(receive_sora_duration, pattern=r"^sora_dur_")
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            MessageHandler(filters.ALL, fallback_msg),
+        ],
+        allow_reentry=True,
+    )
+
     t2i_conv = ConversationHandler(
         entry_points=[
             CommandHandler("t2i", t2i_start),
@@ -1371,6 +1592,7 @@ def main() -> None:
     app.add_handler(i2i_conv)
     app.add_handler(gen_conv)
     app.add_handler(ltx_conv)
+    app.add_handler(sora_conv)
 
     logger.info("Bot started. Access code enabled: %s", settings.access_required)
     app.run_polling(drop_pending_updates=True)

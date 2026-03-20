@@ -66,6 +66,11 @@ All options are connected to working ModelsLab flows.
 Each generation flow now shows live progress updates in chat
 (Submitted, Processing, Retrying, Completed/Failed with elapsed time).
 
+The bot also includes generation UX improvements:
+- **Regenerate** and **Variation** buttons on every result (image/video)
+- **Remember last settings** per user (last model, aspect ratio, duration)
+- Menus now show model speed/quality hints (Fast / Balanced / Highest quality)
+
 ## Text-to-image flow (`/t2i`)
 
 1. Send `/t2i` (or choose **Text to Image** in menu)

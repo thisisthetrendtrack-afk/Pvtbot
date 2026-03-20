@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 from urllib.parse import urlparse
+from uuid import uuid4
 
 import requests
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -49,11 +50,13 @@ LTX_I2V_API_URL = "https://modelslab.com/api/v6/video/img2video_ultra"
 I2V_MODELS = {
     "kling_v3_i2v": {
         "label": "Kling V3.0 Image-to-Video",
+        "ux": "Balanced",
         "fetch": "v7",
         "defaults": {"duration": "5", "model_id": "kling-v3-i2v"},
     },
     "ltx_pro_i2v": {
         "label": "LTX 2.3 Pro Image-to-Video",
+        "ux": "Highest quality",
         "fetch": "v7",
         "defaults": {
             "resolution": "1920x1080",
@@ -65,6 +68,7 @@ I2V_MODELS = {
     },
     "ltx_i2v": {
         "label": "LTX 2.3 Image-to-Video",
+        "ux": "Fast",
         "fetch": "v6",
         "defaults": {
             "resolution": "16:9",
@@ -74,6 +78,7 @@ I2V_MODELS = {
     },
     "grok_i2v": {
         "label": "Grok Imagine Image-to-Video",
+        "ux": "Creative",
         "fetch": "v7",
         "defaults": {
             "resolution": "720p",
@@ -110,12 +115,14 @@ T2I_RATIO_SHORTLIST = ("1:1", "16:9", "9:16")
 T2I_MODELS = {
     "nano": {
         "label": "Nano Banana 2",
+        "ux": "Balanced",
         "endpoint": "v7",
         "model_id": "gemini-3.1-t2i",
         "field": "aspect_ratio",
     },
     "qwen": {
         "label": "Qwen Image 2.0 Pro",
+        "ux": "Highest quality",
         "endpoint": "v7",
         "model_id": "qwen-image-2.0-pro-t2i",
         "field": "size",
@@ -123,6 +130,7 @@ T2I_MODELS = {
     },
     "seedream": {
         "label": "Seedream 5.0 Lite",
+        "ux": "Fast",
         "endpoint": "v7",
         "model_id": "seedream-5-lite-t2i",
         "field": "aspect_ratio",
@@ -157,6 +165,8 @@ I2I_MODEL_ID = "gemini-3.1-i2i"
 ) = range(21)
 
 VERIFIED_USERS: set[int] = set()
+RERUN_CALLBACK_PREFIX = "regen_"
+VARIATION_CALLBACK_PREFIX = "var_"
 
 
 @dataclass(frozen=True)
@@ -238,6 +248,38 @@ def is_verified(user_id: int, settings: Settings) -> bool:
     return (not settings.access_required) or user_id in VERIFIED_USERS
 
 
+def get_user_prefs(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> dict:
+    prefs_by_user = context.bot_data.setdefault("user_prefs", {})
+    return prefs_by_user.setdefault(user_id, {})
+
+
+def get_user_pref(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    key: str,
+    default: str = "",
+) -> str:
+    return str(get_user_prefs(context, user_id).get(key, default))
+
+
+def set_user_pref(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    key: str,
+    value: str,
+) -> None:
+    get_user_prefs(context, user_id)[key] = value
+
+
+def _selected_label(label: str, is_selected: bool) -> str:
+    return f"✅ {label}" if is_selected else label
+
+
+def _model_button_text(model_cfg: dict, is_selected: bool) -> str:
+    base = f"{model_cfg['label']} • {model_cfg['ux']}"
+    return _selected_label(base, is_selected)
+
+
 def menu_text() -> str:
     return (
         "ModelsLab AI Studio\n"
@@ -277,6 +319,7 @@ def help_text() -> str:
         "2) Choose aspect ratio (9:16 / 16:9)\n"
         "3) Choose duration (4s / 8s / 12s)\n\n"
         "Open main menu anytime with /menu\n\n"
+        "After any result, use Regenerate/Variation buttons to iterate faster.\n\n"
         "The bot sends your request to ModelsLab and returns the generated video."
     )
 
@@ -292,57 +335,116 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def text_to_video_keyboard() -> InlineKeyboardMarkup:
+def text_to_video_keyboard(selected_key: str = "") -> InlineKeyboardMarkup:
+    ltx_label = _selected_label("LTX 2.3 (Fast)", selected_key == "ltx")
+    kling_label = _selected_label("Kling V3.0 (Balanced)", selected_key == "kling_v3_t2v")
+    sora_label = _selected_label("Sora 2 Pro (Highest quality)", selected_key == "sora")
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("LTX 2.3 (Text to Video)", callback_data="menu_start_ltx")],
+            [InlineKeyboardButton(ltx_label, callback_data="menu_start_ltx")],
             [
                 InlineKeyboardButton(
-                    "Kling V3.0 (Text to Video)",
+                    kling_label,
                     callback_data="menu_start_kling_v3_t2v",
                 )
             ],
-            [InlineKeyboardButton("Sora 2 Pro (Text to Video)", callback_data="menu_start_sora")],
+            [InlineKeyboardButton(sora_label, callback_data="menu_start_sora")],
             [InlineKeyboardButton("⬅ Back", callback_data=MENU_BACK_CALLBACK)],
         ]
     )
 
 
-def image_to_video_keyboard() -> InlineKeyboardMarkup:
+def image_to_video_keyboard(selected_key: str = "") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
-                    "Kling 3.0 Motion Control", callback_data="menu_start_kling"
+                    _selected_label("Kling 3.0 Motion Control (Character control)", selected_key == "kling_motion"),
+                    callback_data="menu_start_kling",
                 )
             ],
-            [InlineKeyboardButton("Kling V3.0 (Image to Video)", callback_data="menu_start_i2v_kling_v3")],
-            [InlineKeyboardButton("LTX 2.3 Pro (Image to Video)", callback_data="menu_start_i2v_ltx_pro")],
-            [InlineKeyboardButton("LTX 2.3 (Image to Video)", callback_data="menu_start_i2v_ltx")],
-            [InlineKeyboardButton("Grok Imagine (Image to Video)", callback_data="menu_start_i2v_grok")],
+            [
+                InlineKeyboardButton(
+                    _selected_label("Kling V3.0 (Balanced)", selected_key == "kling_v3_i2v"),
+                    callback_data="menu_start_i2v_kling_v3",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    _selected_label("LTX 2.3 Pro (Highest quality)", selected_key == "ltx_pro_i2v"),
+                    callback_data="menu_start_i2v_ltx_pro",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    _selected_label("LTX 2.3 (Fast)", selected_key == "ltx_i2v"),
+                    callback_data="menu_start_i2v_ltx",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    _selected_label("Grok Imagine (Creative)", selected_key == "grok_i2v"),
+                    callback_data="menu_start_i2v_grok",
+                )
+            ],
             [InlineKeyboardButton("⬅ Back", callback_data=MENU_BACK_CALLBACK)],
         ]
     )
 
 
-def i2v_model_keyboard() -> InlineKeyboardMarkup:
+def i2v_model_keyboard(selected_key: str = "") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("Kling V3.0 Image-to-Video", callback_data="menu_start_i2v_kling_v3")],
-            [InlineKeyboardButton("LTX 2.3 Pro Image-to-Video", callback_data="menu_start_i2v_ltx_pro")],
-            [InlineKeyboardButton("LTX 2.3 Image-to-Video", callback_data="menu_start_i2v_ltx")],
-            [InlineKeyboardButton("Grok Imagine Image-to-Video", callback_data="menu_start_i2v_grok")],
+            [
+                InlineKeyboardButton(
+                    _model_button_text(I2V_MODELS["kling_v3_i2v"], selected_key == "kling_v3_i2v"),
+                    callback_data="menu_start_i2v_kling_v3",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    _model_button_text(I2V_MODELS["ltx_pro_i2v"], selected_key == "ltx_pro_i2v"),
+                    callback_data="menu_start_i2v_ltx_pro",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    _model_button_text(I2V_MODELS["ltx_i2v"], selected_key == "ltx_i2v"),
+                    callback_data="menu_start_i2v_ltx",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    _model_button_text(I2V_MODELS["grok_i2v"], selected_key == "grok_i2v"),
+                    callback_data="menu_start_i2v_grok",
+                )
+            ],
             [InlineKeyboardButton("⬅ Back", callback_data=MENU_BACK_CALLBACK)],
         ]
     )
 
 
-def t2i_model_keyboard() -> InlineKeyboardMarkup:
+def t2i_model_keyboard(selected_key: str = "") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("Nano Banana 2", callback_data="t2i_model_nano")],
-            [InlineKeyboardButton("Qwen Image 2.0 Pro", callback_data="t2i_model_qwen")],
-            [InlineKeyboardButton("Seedream 5.0 Lite", callback_data="t2i_model_seedream")],
+            [
+                InlineKeyboardButton(
+                    _model_button_text(T2I_MODELS["nano"], selected_key == "nano"),
+                    callback_data="t2i_model_nano",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    _model_button_text(T2I_MODELS["qwen"], selected_key == "qwen"),
+                    callback_data="t2i_model_qwen",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    _model_button_text(T2I_MODELS["seedream"], selected_key == "seedream"),
+                    callback_data="t2i_model_seedream",
+                )
+            ],
             [InlineKeyboardButton("⬅ Back", callback_data=MENU_BACK_CALLBACK)],
         ]
     )
@@ -672,6 +774,226 @@ def media_caption(prompt: str, details: list[str]) -> str:
     return truncate_text(base, 1024)
 
 
+def _result_action_store(context: ContextTypes.DEFAULT_TYPE) -> dict:
+    return context.bot_data.setdefault("result_actions", {})
+
+
+def result_action_markup(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    chat_id: int,
+    task_type: str,
+    payload: dict,
+    model_name: str,
+) -> InlineKeyboardMarkup:
+    token = uuid4().hex[:10]
+    store = _result_action_store(context)
+    store[token] = {
+        "user_id": user_id,
+        "chat_id": chat_id,
+        "task_type": task_type,
+        "payload": dict(payload),
+        "model_name": model_name,
+    }
+    # Keep memory bounded for long-running bots.
+    while len(store) > 400:
+        store.pop(next(iter(store)))
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🔁 Regenerate", callback_data=f"{RERUN_CALLBACK_PREFIX}{token}"),
+                InlineKeyboardButton("✨ Variation", callback_data=f"{VARIATION_CALLBACK_PREFIX}{token}"),
+            ],
+            [InlineKeyboardButton("🏠 Menu", callback_data=MENU_BACK_CALLBACK)],
+        ]
+    )
+
+
+def variation_prompt(prompt: str) -> str:
+    return (
+        f"{prompt}\n\n"
+        "Create a clearly different variation of the same concept with a new composition,"
+        " camera framing, and visual details."
+    )
+
+
+def generation_config_from_task(task_type: str, payload: dict) -> dict:
+    if task_type == "kling_motion":
+        return {
+            "call": call_modelslab_kling,
+            "fetch": fetch_result_v7,
+            "kind": "video",
+            "job_title": "Kling 3.0 Motion Control",
+            "max_wait": 420,
+        }
+    if task_type == "ltx_t2v":
+        return {
+            "call": call_modelslab_ltx,
+            "fetch": fetch_result_v6,
+            "kind": "video",
+            "job_title": "LTX 2.3 Text-to-Video",
+            "max_wait": 420,
+        }
+    if task_type == "kling_v3_t2v":
+        return {
+            "call": call_modelslab_kling_v3_t2v,
+            "fetch": fetch_result_v7,
+            "kind": "video",
+            "job_title": "Kling V3.0 Text-to-Video",
+            "max_wait": 420,
+        }
+    if task_type == "sora_t2v":
+        return {
+            "call": call_modelslab_sora,
+            "fetch": fetch_result_v7,
+            "kind": "video",
+            "job_title": "Sora 2 Pro Text-to-Video",
+            "max_wait": 420,
+        }
+    if task_type == "t2i":
+        model_key = str(payload.get("t2i_model_key", "nano"))
+        model_label = T2I_MODELS.get(model_key, T2I_MODELS["nano"])["label"]
+        return {
+            "call": call_modelslab_t2i,
+            "fetch": fetch_result_t2i,
+            "kind": "image",
+            "job_title": f"{model_label} Text-to-Image",
+            "max_wait": 240,
+        }
+    if task_type == "i2i":
+        return {
+            "call": call_modelslab_i2i,
+            "fetch": fetch_result_t2i,
+            "kind": "image",
+            "job_title": "Nano Banana 2 Image Edit",
+            "max_wait": 240,
+        }
+    if task_type == "i2v":
+        model_key = str(payload.get("i2v_model_key", ""))
+        model_cfg = I2V_MODELS.get(model_key)
+        if not model_cfg:
+            raise RuntimeError("Unsupported image-to-video model in saved action.")
+        return {
+            "call": call_modelslab_i2v,
+            "fetch": fetch_result_v7 if model_cfg["fetch"] == "v7" else fetch_result_v6,
+            "kind": "video",
+            "job_title": model_cfg["label"],
+            "max_wait": 420,
+        }
+    raise RuntimeError(f"Unsupported saved task type: {task_type}")
+
+
+async def run_saved_action(
+    context: ContextTypes.DEFAULT_TYPE,
+    action: dict,
+    use_variation: bool,
+) -> None:
+    settings: Settings = context.bot_data["settings"]
+    chat_id = int(action["chat_id"])
+    user_id = int(action["user_id"])
+    task_type = str(action["task_type"])
+    model_name = str(action["model_name"])
+    payload = dict(action["payload"])
+    if use_variation and str(payload.get("prompt", "")).strip():
+        payload["prompt"] = variation_prompt(str(payload["prompt"]).strip())
+
+    config = generation_config_from_task(task_type, payload)
+    run_label = "Variation" if use_variation else "Regenerate"
+    status_message = await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"⏳ {config['job_title']} ({run_label})\nStatus: Submitted\nElapsed: 0s",
+    )
+    progress_callback = make_progress_callback(
+        context=context,
+        status_message=status_message,
+        job_title=f"{config['job_title']} ({run_label})",
+    )
+    try:
+        created = await asyncio.to_thread(config["call"], settings, payload)
+        output = created.get("output") or []
+        result_url: Optional[str] = output[0] if str(created.get("status", "")).lower() == "success" and output else None
+        if not result_url:
+            request_id = created.get("id") or created.get("request_id")
+            if not request_id:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"Unexpected ModelsLab response: {created}",
+                )
+                return
+            result_url = await poll_result(
+                settings,
+                request_id=request_id,
+                fetch_fn=config["fetch"],
+                progress_callback=progress_callback,
+                max_wait=int(config["max_wait"]),
+            )
+
+        if not result_url:
+            await finalize_progress_message(
+                context,
+                status_message,
+                f"❌ {config['job_title']} ({run_label}) failed or timed out.",
+            )
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"{config['job_title']} {run_label.lower()} failed or timed out.",
+            )
+            return
+
+        await finalize_progress_message(
+            context,
+            status_message,
+            f"✅ {config['job_title']} ({run_label}) completed. Sending result...",
+        )
+        if config["kind"] == "video":
+            await send_video_result(
+                context=context,
+                chat_id=chat_id,
+                video_url=result_url,
+                payload=payload,
+                model_name=model_name,
+                user_id=user_id,
+                task_type=task_type,
+            )
+        else:
+            await send_image_result(
+                context=context,
+                chat_id=chat_id,
+                image_url=result_url,
+                payload=payload,
+                model_name=model_name,
+                user_id=user_id,
+                task_type=task_type,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Saved action execution failed")
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"Action failed: {exc}",
+        )
+
+
+async def result_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings: Settings = context.bot_data["settings"]
+    query = update.callback_query
+    token = query.data.split("_", 1)[1]
+    is_variation = query.data.startswith(VARIATION_CALLBACK_PREFIX)
+    action = _result_action_store(context).get(token)
+
+    if not action:
+        await query.answer("This action expired. Generate again to refresh buttons.", show_alert=True)
+        return
+    if not is_verified(query.from_user.id, settings):
+        await query.answer("Access required. Send /start first.", show_alert=True)
+        return
+    if int(action["user_id"]) != query.from_user.id:
+        await query.answer("Only the original requester can use this action.", show_alert=True)
+        return
+
+    await query.answer("Running variation..." if is_variation else "Regenerating...")
+    await run_saved_action(context, action, use_variation=is_variation)
+
+
 def telegram_file_url(settings: Settings, file_path: str) -> str:
     if file_path.startswith("http://") or file_path.startswith("https://"):
         return file_path
@@ -728,16 +1050,28 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     data = query.data
     if data == "menu_t2v":
+        last_t2v_model = get_user_pref(context, query.from_user.id, "t2v_model")
         await query.edit_message_text(
-            "🎬 Text to Video\n\nChoose a model:",
-            reply_markup=text_to_video_keyboard(),
+            "🎬 Text to Video\n\n"
+            "Quick guide:\n"
+            "• Fast: LTX 2.3\n"
+            "• Balanced: Kling V3.0\n"
+            "• Highest quality: Sora 2 Pro\n\n"
+            "Choose a model:",
+            reply_markup=text_to_video_keyboard(last_t2v_model),
         )
         return
 
     if data == "menu_i2v":
+        last_i2v_model = get_user_pref(context, query.from_user.id, "i2v_last_entry")
         await query.edit_message_text(
-            "🧷 Image to Video\n\nChoose a model:",
-            reply_markup=image_to_video_keyboard(),
+            "🧷 Image to Video\n\n"
+            "Quick guide:\n"
+            "• Character control: Kling Motion\n"
+            "• Fast: LTX 2.3\n"
+            "• Highest quality: LTX 2.3 Pro\n\n"
+            "Choose a model:",
+            reply_markup=image_to_video_keyboard(last_i2v_model),
         )
         return
 
@@ -747,14 +1081,24 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def t2i_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     settings: Settings = context.bot_data["settings"]
-    if not is_verified(update.effective_user.id, settings):
+    user_id = update.effective_user.id
+    if not is_verified(user_id, settings):
         await update.message.reply_text("Send /start and pass access code first.")
         return ConversationHandler.END
 
+    last_model = get_user_pref(context, user_id, "t2i_model_key")
+    last_ratio = get_user_pref(context, user_id, "t2i_aspect_ratio")
+    last_summary = []
+    if last_model in T2I_MODELS:
+        last_summary.append(T2I_MODELS[last_model]["label"])
+    if last_ratio:
+        last_summary.append(last_ratio)
+
     context.user_data.clear()
     await update.message.reply_text(
-        "Text to Image Step 1/3: Choose model.",
-        reply_markup=t2i_model_keyboard(),
+        "Text to Image Step 1/3: Choose model."
+        + (f"\nLast used: {' | '.join(last_summary)}" if last_summary else ""),
+        reply_markup=t2i_model_keyboard(last_model),
     )
     return WAITING_T2I_MODEL
 
@@ -768,10 +1112,19 @@ async def t2i_start_from_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.edit_message_text("Access required. Send /start first.")
         return ConversationHandler.END
 
+    last_model = get_user_pref(context, query.from_user.id, "t2i_model_key")
+    last_ratio = get_user_pref(context, query.from_user.id, "t2i_aspect_ratio")
+    last_summary = []
+    if last_model in T2I_MODELS:
+        last_summary.append(T2I_MODELS[last_model]["label"])
+    if last_ratio:
+        last_summary.append(last_ratio)
+
     context.user_data.clear()
     await query.edit_message_text(
-        "Text to Image Step 1/3: Choose model.",
-        reply_markup=t2i_model_keyboard(),
+        "Text to Image Step 1/3: Choose model."
+        + (f"\nLast used: {' | '.join(last_summary)}" if last_summary else ""),
+        reply_markup=t2i_model_keyboard(last_model),
     )
     return WAITING_T2I_MODEL
 
@@ -784,6 +1137,7 @@ async def receive_t2i_model(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await query.edit_message_text("Unsupported text-to-image model. Send /t2i again.")
         return ConversationHandler.END
 
+    set_user_pref(context, query.from_user.id, "t2i_model_key", model_key)
     context.user_data["t2i_model_key"] = model_key
     await query.edit_message_text(
         f"Text to Image Step 2/3: Enter prompt for {T2I_MODELS[model_key]['label']}."
@@ -798,15 +1152,19 @@ async def receive_t2i_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return WAITING_T2I_PROMPT
 
     context.user_data["prompt"] = prompt
+    last_ratio = get_user_pref(context, update.effective_user.id, "t2i_aspect_ratio", "1:1")
     keyboard = [
         [
-            InlineKeyboardButton("1:1", callback_data="t2i_ar_1:1"),
-            InlineKeyboardButton("16:9", callback_data="t2i_ar_16:9"),
-            InlineKeyboardButton("9:16", callback_data="t2i_ar_9:16"),
+            InlineKeyboardButton(_selected_label("1:1", last_ratio == "1:1"), callback_data="t2i_ar_1:1"),
+            InlineKeyboardButton(
+                _selected_label("16:9", last_ratio == "16:9"),
+                callback_data="t2i_ar_16:9",
+            ),
+            InlineKeyboardButton(_selected_label("9:16", last_ratio == "9:16"), callback_data="t2i_ar_9:16"),
         ],
     ]
     await update.message.reply_text(
-        "Text to Image Step 3/3: Choose aspect ratio.",
+        "Text to Image Step 3/3: Choose aspect ratio. (✅ = last used)",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
     return WAITING_T2I_ASPECT_RATIO
@@ -831,6 +1189,7 @@ async def receive_t2i_aspect_ratio(
 
     context.user_data["t2i_model_key"] = model_key
     context.user_data["aspect_ratio"] = aspect_ratio
+    set_user_pref(context, query.from_user.id, "t2i_aspect_ratio", aspect_ratio)
     await query.edit_message_text(
         f"Generating image with {T2I_MODELS[model_key]['label']}. Please wait..."
     )
@@ -861,6 +1220,8 @@ async def receive_t2i_aspect_ratio(
                     output[0],
                     payload,
                     model_name=f"{T2I_MODELS[model_key]['label']} ({aspect_ratio})",
+                    user_id=query.from_user.id,
+                    task_type="t2i",
                 )
                 return ConversationHandler.END
 
@@ -902,6 +1263,8 @@ async def receive_t2i_aspect_ratio(
             image_url,
             payload,
             model_name=f"{T2I_MODELS[model_key]['label']} ({aspect_ratio})",
+            user_id=query.from_user.id,
+            task_type="t2i",
         )
         return ConversationHandler.END
     except Exception as exc:  # noqa: BLE001
@@ -915,14 +1278,17 @@ async def receive_t2i_aspect_ratio(
 
 async def i2v_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     settings: Settings = context.bot_data["settings"]
-    if not is_verified(update.effective_user.id, settings):
+    user_id = update.effective_user.id
+    if not is_verified(user_id, settings):
         await update.message.reply_text("Send /start and pass access code first.")
         return ConversationHandler.END
 
+    last_i2v_model = get_user_pref(context, user_id, "i2v_model_key")
     context.user_data.clear()
     await update.message.reply_text(
-        "Image-to-Video Step 1/3: Choose model.",
-        reply_markup=i2v_model_keyboard(),
+        "Image-to-Video Step 1/3: Choose model."
+        + (f"\nLast used: {I2V_MODELS[last_i2v_model]['label']}" if last_i2v_model in I2V_MODELS else ""),
+        reply_markup=i2v_model_keyboard(last_i2v_model),
     )
     return WAITING_I2V_MODEL
 
@@ -948,6 +1314,8 @@ async def i2v_start_from_menu(
 
     context.user_data.clear()
     context.user_data["i2v_model_key"] = model_key
+    set_user_pref(context, query.from_user.id, "i2v_model_key", model_key)
+    set_user_pref(context, query.from_user.id, "i2v_last_entry", model_key)
     await query.edit_message_text(
         f"{I2V_MODELS[model_key]['label']}\n\nStep 2/3: Send source image (JPG/PNG)."
     )
@@ -1053,6 +1421,8 @@ async def receive_i2v_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     output[0],
                     payload,
                     model_name=model_label,
+                    user_id=update.effective_user.id,
+                    task_type="i2v",
                 )
                 return ConversationHandler.END
 
@@ -1094,6 +1464,8 @@ async def receive_i2v_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
             video_url,
             payload,
             model_name=model_label,
+            user_id=update.effective_user.id,
+            task_type="i2v",
         )
         return ConversationHandler.END
     except Exception as exc:  # noqa: BLE001
@@ -1107,12 +1479,17 @@ async def receive_i2v_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def imgedit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     settings: Settings = context.bot_data["settings"]
-    if not is_verified(update.effective_user.id, settings):
+    user_id = update.effective_user.id
+    if not is_verified(user_id, settings):
         await update.message.reply_text("Send /start and pass access code first.")
         return ConversationHandler.END
 
+    last_ratio = get_user_pref(context, user_id, "i2i_aspect_ratio")
     context.user_data.clear()
-    await update.message.reply_text("Image Edit Step 1/3: Send source image (JPG/PNG).")
+    await update.message.reply_text(
+        "Image Edit Step 1/3: Send source image (JPG/PNG)."
+        + (f"\nLast ratio: {last_ratio}" if last_ratio else "")
+    )
     return WAITING_I2I_IMAGE
 
 
@@ -1127,8 +1504,12 @@ async def imgedit_start_from_menu(
         await query.edit_message_text("Access required. Send /start first.")
         return ConversationHandler.END
 
+    last_ratio = get_user_pref(context, query.from_user.id, "i2i_aspect_ratio")
     context.user_data.clear()
-    await query.edit_message_text("Image Edit Step 1/3: Send source image (JPG/PNG).")
+    await query.edit_message_text(
+        "Image Edit Step 1/3: Send source image (JPG/PNG)."
+        + (f"\nLast ratio: {last_ratio}" if last_ratio else "")
+    )
     return WAITING_I2I_IMAGE
 
 
@@ -1157,20 +1538,21 @@ async def receive_i2i_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return WAITING_I2I_PROMPT
 
     context.user_data["prompt"] = prompt
+    last_ratio = get_user_pref(context, update.effective_user.id, "i2i_aspect_ratio", "1:1")
     keyboard = [
         [
-            InlineKeyboardButton("1:1", callback_data="i2i_ar_1:1"),
-            InlineKeyboardButton("16:9", callback_data="i2i_ar_16:9"),
-            InlineKeyboardButton("9:16", callback_data="i2i_ar_9:16"),
+            InlineKeyboardButton(_selected_label("1:1", last_ratio == "1:1"), callback_data="i2i_ar_1:1"),
+            InlineKeyboardButton(_selected_label("16:9", last_ratio == "16:9"), callback_data="i2i_ar_16:9"),
+            InlineKeyboardButton(_selected_label("9:16", last_ratio == "9:16"), callback_data="i2i_ar_9:16"),
         ],
         [
-            InlineKeyboardButton("4:5", callback_data="i2i_ar_4:5"),
-            InlineKeyboardButton("3:4", callback_data="i2i_ar_3:4"),
-            InlineKeyboardButton("2:3", callback_data="i2i_ar_2:3"),
+            InlineKeyboardButton(_selected_label("4:5", last_ratio == "4:5"), callback_data="i2i_ar_4:5"),
+            InlineKeyboardButton(_selected_label("3:4", last_ratio == "3:4"), callback_data="i2i_ar_3:4"),
+            InlineKeyboardButton(_selected_label("2:3", last_ratio == "2:3"), callback_data="i2i_ar_2:3"),
         ],
     ]
     await update.message.reply_text(
-        "Image Edit Step 3/3: Choose aspect ratio.",
+        "Image Edit Step 3/3: Choose aspect ratio. (✅ = last used)",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
     return WAITING_I2I_ASPECT_RATIO
@@ -1189,6 +1571,7 @@ async def receive_i2i_aspect_ratio(
         return ConversationHandler.END
 
     context.user_data["aspect_ratio"] = aspect_ratio
+    set_user_pref(context, query.from_user.id, "i2i_aspect_ratio", aspect_ratio)
     await query.edit_message_text("Editing image with Nano Banana 2. Please wait...")
 
     payload = dict(context.user_data)
@@ -1217,6 +1600,8 @@ async def receive_i2i_aspect_ratio(
                     output[0],
                     payload,
                     model_name=f"Nano Banana 2 Image Edit ({aspect_ratio})",
+                    user_id=query.from_user.id,
+                    task_type="i2i",
                 )
                 return ConversationHandler.END
 
@@ -1258,6 +1643,8 @@ async def receive_i2i_aspect_ratio(
             image_url,
             payload,
             model_name=f"Nano Banana 2 Image Edit ({aspect_ratio})",
+            user_id=query.from_user.id,
+            task_type="i2i",
         )
         return ConversationHandler.END
     except Exception as exc:  # noqa: BLE001
@@ -1275,6 +1662,7 @@ async def generate_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("Send /start and pass access code first.")
         return ConversationHandler.END
 
+    set_user_pref(context, update.effective_user.id, "i2v_last_entry", "kling_motion")
     context.user_data.clear()
     await update.message.reply_text(
         "Step 1/3: Send character image (JPG/PNG)."
@@ -1293,6 +1681,7 @@ async def generate_start_from_menu(
         await query.edit_message_text("Access required. Send /start first.")
         return ConversationHandler.END
 
+    set_user_pref(context, query.from_user.id, "i2v_last_entry", "kling_motion")
     context.user_data.clear()
     await query.edit_message_text(
         "Kling 3.0 Motion Control\n\nStep 1/3: Send character image (JPG/PNG)."
@@ -1375,6 +1764,8 @@ async def receive_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     output[0],
                     payload,
                     model_name="Kling 3.0 Motion Control",
+                    user_id=update.effective_user.id,
+                    task_type="kling_motion",
                 )
                 return ConversationHandler.END
 
@@ -1415,6 +1806,8 @@ async def receive_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             video_url,
             payload,
             model_name="Kling 3.0 Motion Control",
+            user_id=update.effective_user.id,
+            task_type="kling_motion",
         )
         return ConversationHandler.END
     except Exception as exc:  # noqa: BLE001
@@ -1428,12 +1821,18 @@ async def receive_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def ltx_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     settings: Settings = context.bot_data["settings"]
-    if not is_verified(update.effective_user.id, settings):
+    user_id = update.effective_user.id
+    if not is_verified(user_id, settings):
         await update.message.reply_text("Send /start and pass access code first.")
         return ConversationHandler.END
 
+    set_user_pref(context, user_id, "t2v_model", "ltx")
+    last_ratio = get_user_pref(context, user_id, "ltx_resolution")
     context.user_data.clear()
-    await update.message.reply_text("LTX 2.3 Step 1/2: Enter your prompt text.")
+    await update.message.reply_text(
+        "LTX 2.3 Step 1/2: Enter your prompt text."
+        + (f"\nLast ratio: {last_ratio}" if last_ratio else "")
+    )
     return WAITING_LTX_PROMPT
 
 
@@ -1446,8 +1845,13 @@ async def ltx_start_from_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.edit_message_text("Access required. Send /start first.")
         return ConversationHandler.END
 
+    set_user_pref(context, query.from_user.id, "t2v_model", "ltx")
+    last_ratio = get_user_pref(context, query.from_user.id, "ltx_resolution")
     context.user_data.clear()
-    await query.edit_message_text("LTX 2.3 Step 1/2: Enter your prompt text.")
+    await query.edit_message_text(
+        "LTX 2.3 Step 1/2: Enter your prompt text."
+        + (f"\nLast ratio: {last_ratio}" if last_ratio else "")
+    )
     return WAITING_LTX_PROMPT
 
 
@@ -1458,13 +1862,14 @@ async def receive_ltx_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return WAITING_LTX_PROMPT
 
     context.user_data["prompt"] = prompt
+    last_ratio = get_user_pref(context, update.effective_user.id, "ltx_resolution", "1:1")
     keyboard = [[
-        InlineKeyboardButton("1:1", callback_data="ltx_res_1:1"),
-        InlineKeyboardButton("16:9", callback_data="ltx_res_16:9"),
-        InlineKeyboardButton("9:16", callback_data="ltx_res_9:16"),
+        InlineKeyboardButton(_selected_label("1:1", last_ratio == "1:1"), callback_data="ltx_res_1:1"),
+        InlineKeyboardButton(_selected_label("16:9", last_ratio == "16:9"), callback_data="ltx_res_16:9"),
+        InlineKeyboardButton(_selected_label("9:16", last_ratio == "9:16"), callback_data="ltx_res_9:16"),
     ]]
     await update.message.reply_text(
-        "LTX 2.3 Step 2/2: Choose aspect ratio.",
+        "LTX 2.3 Step 2/2: Choose aspect ratio. (✅ = last used)",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
     return WAITING_LTX_RESOLUTION
@@ -1481,6 +1886,7 @@ async def receive_ltx_resolution(update: Update, context: ContextTypes.DEFAULT_T
         return ConversationHandler.END
 
     context.user_data["resolution"] = resolution
+    set_user_pref(context, query.from_user.id, "ltx_resolution", resolution)
     await query.edit_message_text("Generating LTX 2.3 video. Please wait...")
 
     payload = dict(context.user_data)
@@ -1509,6 +1915,8 @@ async def receive_ltx_resolution(update: Update, context: ContextTypes.DEFAULT_T
                     output[0],
                     payload,
                     model_name=f"LTX 2.3 ({resolution})",
+                    user_id=query.from_user.id,
+                    task_type="ltx_t2v",
                 )
                 return ConversationHandler.END
 
@@ -1549,6 +1957,8 @@ async def receive_ltx_resolution(update: Update, context: ContextTypes.DEFAULT_T
             video_url,
             payload,
             model_name=f"LTX 2.3 ({resolution})",
+            user_id=query.from_user.id,
+            task_type="ltx_t2v",
         )
         return ConversationHandler.END
     except Exception as exc:  # noqa: BLE001
@@ -1562,12 +1972,19 @@ async def receive_ltx_resolution(update: Update, context: ContextTypes.DEFAULT_T
 
 async def kling_v3_t2v_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     settings: Settings = context.bot_data["settings"]
-    if not is_verified(update.effective_user.id, settings):
+    user_id = update.effective_user.id
+    if not is_verified(user_id, settings):
         await update.message.reply_text("Send /start and pass access code first.")
         return ConversationHandler.END
 
+    set_user_pref(context, user_id, "t2v_model", "kling_v3_t2v")
+    last_ar = get_user_pref(context, user_id, "kling_v3_aspect_ratio")
+    last_dur = get_user_pref(context, user_id, "kling_v3_duration")
     context.user_data.clear()
-    await update.message.reply_text("Kling V3.0 Step 1/3: Enter your prompt text.")
+    await update.message.reply_text(
+        "Kling V3.0 Step 1/3: Enter your prompt text."
+        + (f"\nLast used: {last_ar or '?'} / {last_dur or '?'}s" if (last_ar or last_dur) else "")
+    )
     return WAITING_KLING_V3_T2V_PROMPT
 
 
@@ -1582,8 +1999,14 @@ async def kling_v3_t2v_start_from_menu(
         await query.edit_message_text("Access required. Send /start first.")
         return ConversationHandler.END
 
+    set_user_pref(context, query.from_user.id, "t2v_model", "kling_v3_t2v")
+    last_ar = get_user_pref(context, query.from_user.id, "kling_v3_aspect_ratio")
+    last_dur = get_user_pref(context, query.from_user.id, "kling_v3_duration")
     context.user_data.clear()
-    await query.edit_message_text("Kling V3.0 Step 1/3: Enter your prompt text.")
+    await query.edit_message_text(
+        "Kling V3.0 Step 1/3: Enter your prompt text."
+        + (f"\nLast used: {last_ar or '?'} / {last_dur or '?'}s" if (last_ar or last_dur) else "")
+    )
     return WAITING_KLING_V3_T2V_PROMPT
 
 
@@ -1596,13 +2019,14 @@ async def receive_kling_v3_t2v_prompt(
         return WAITING_KLING_V3_T2V_PROMPT
 
     context.user_data["prompt"] = prompt
+    last_ar = get_user_pref(context, update.effective_user.id, "kling_v3_aspect_ratio", "1:1")
     keyboard = [[
-        InlineKeyboardButton("1:1", callback_data="kv3_ar_1:1"),
-        InlineKeyboardButton("9:16", callback_data="kv3_ar_9:16"),
-        InlineKeyboardButton("16:9", callback_data="kv3_ar_16:9"),
+        InlineKeyboardButton(_selected_label("1:1", last_ar == "1:1"), callback_data="kv3_ar_1:1"),
+        InlineKeyboardButton(_selected_label("9:16", last_ar == "9:16"), callback_data="kv3_ar_9:16"),
+        InlineKeyboardButton(_selected_label("16:9", last_ar == "16:9"), callback_data="kv3_ar_16:9"),
     ]]
     await update.message.reply_text(
-        "Kling V3.0 Step 2/3: Choose aspect ratio.",
+        "Kling V3.0 Step 2/3: Choose aspect ratio. (✅ = last used)",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
     return WAITING_KLING_V3_T2V_ASPECT_RATIO
@@ -1622,12 +2046,14 @@ async def receive_kling_v3_t2v_aspect_ratio(
         return ConversationHandler.END
 
     context.user_data["aspect_ratio"] = aspect_ratio
+    set_user_pref(context, query.from_user.id, "kling_v3_aspect_ratio", aspect_ratio)
+    last_duration = get_user_pref(context, query.from_user.id, "kling_v3_duration", "5")
     keyboard = [[
-        InlineKeyboardButton("5s", callback_data="kv3_dur_5"),
-        InlineKeyboardButton("10s", callback_data="kv3_dur_10"),
+        InlineKeyboardButton(_selected_label("5s", last_duration == "5"), callback_data="kv3_dur_5"),
+        InlineKeyboardButton(_selected_label("10s", last_duration == "10"), callback_data="kv3_dur_10"),
     ]]
     await query.edit_message_text(
-        "Kling V3.0 Step 3/3: Choose duration.",
+        "Kling V3.0 Step 3/3: Choose duration. (✅ = last used)",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
     return WAITING_KLING_V3_T2V_DURATION
@@ -1646,6 +2072,7 @@ async def receive_kling_v3_t2v_duration(
         return ConversationHandler.END
 
     context.user_data["duration"] = duration
+    set_user_pref(context, query.from_user.id, "kling_v3_duration", duration)
     await query.edit_message_text("Generating Kling V3.0 video. Please wait...")
 
     payload = dict(context.user_data)
@@ -1675,6 +2102,8 @@ async def receive_kling_v3_t2v_duration(
                     output[0],
                     payload,
                     model_name=f"Kling V3.0 ({payload.get('aspect_ratio', '?')}, {duration}s)",
+                    user_id=query.from_user.id,
+                    task_type="kling_v3_t2v",
                 )
                 return ConversationHandler.END
 
@@ -1715,6 +2144,8 @@ async def receive_kling_v3_t2v_duration(
             video_url,
             payload,
             model_name=f"Kling V3.0 ({payload.get('aspect_ratio', '?')}, {duration}s)",
+            user_id=query.from_user.id,
+            task_type="kling_v3_t2v",
         )
         return ConversationHandler.END
     except Exception as exc:  # noqa: BLE001
@@ -1728,12 +2159,19 @@ async def receive_kling_v3_t2v_duration(
 
 async def sora_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     settings: Settings = context.bot_data["settings"]
-    if not is_verified(update.effective_user.id, settings):
+    user_id = update.effective_user.id
+    if not is_verified(user_id, settings):
         await update.message.reply_text("Send /start and pass access code first.")
         return ConversationHandler.END
 
+    set_user_pref(context, user_id, "t2v_model", "sora")
+    last_ar = get_user_pref(context, user_id, "sora_aspect_ratio_label")
+    last_dur = get_user_pref(context, user_id, "sora_duration")
     context.user_data.clear()
-    await update.message.reply_text("Sora 2 Pro Step 1/3: Enter your prompt text.")
+    await update.message.reply_text(
+        "Sora 2 Pro Step 1/3: Enter your prompt text."
+        + (f"\nLast used: {last_ar or '?'} / {last_dur or '?'}s" if (last_ar or last_dur) else "")
+    )
     return WAITING_SORA_PROMPT
 
 
@@ -1746,8 +2184,14 @@ async def sora_start_from_menu(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("Access required. Send /start first.")
         return ConversationHandler.END
 
+    set_user_pref(context, query.from_user.id, "t2v_model", "sora")
+    last_ar = get_user_pref(context, query.from_user.id, "sora_aspect_ratio_label")
+    last_dur = get_user_pref(context, query.from_user.id, "sora_duration")
     context.user_data.clear()
-    await query.edit_message_text("Sora 2 Pro Step 1/3: Enter your prompt text.")
+    await query.edit_message_text(
+        "Sora 2 Pro Step 1/3: Enter your prompt text."
+        + (f"\nLast used: {last_ar or '?'} / {last_dur or '?'}s" if (last_ar or last_dur) else "")
+    )
     return WAITING_SORA_PROMPT
 
 
@@ -1758,12 +2202,13 @@ async def receive_sora_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE
         return WAITING_SORA_PROMPT
 
     context.user_data["prompt"] = prompt
+    last_ar = get_user_pref(context, update.effective_user.id, "sora_aspect_ratio_label", "9:16")
     keyboard = [[
-        InlineKeyboardButton("9:16", callback_data="sora_ar_9x16"),
-        InlineKeyboardButton("16:9", callback_data="sora_ar_16x9"),
+        InlineKeyboardButton(_selected_label("9:16", last_ar == "9:16"), callback_data="sora_ar_9x16"),
+        InlineKeyboardButton(_selected_label("16:9", last_ar == "16:9"), callback_data="sora_ar_16x9"),
     ]]
     await update.message.reply_text(
-        "Sora 2 Pro Step 2/3: Choose aspect ratio.",
+        "Sora 2 Pro Step 2/3: Choose aspect ratio. (✅ = last used)",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
     return WAITING_SORA_ASPECT_RATIO
@@ -1786,14 +2231,16 @@ async def receive_sora_aspect_ratio(
 
     context.user_data["aspect_ratio"] = SORA_ASPECT_RATIOS[label]
     context.user_data["aspect_ratio_label"] = label
+    set_user_pref(context, query.from_user.id, "sora_aspect_ratio_label", label)
+    last_duration = get_user_pref(context, query.from_user.id, "sora_duration", "8")
 
     keyboard = [[
-        InlineKeyboardButton("4s", callback_data="sora_dur_4"),
-        InlineKeyboardButton("8s", callback_data="sora_dur_8"),
-        InlineKeyboardButton("12s", callback_data="sora_dur_12"),
+        InlineKeyboardButton(_selected_label("4s", last_duration == "4"), callback_data="sora_dur_4"),
+        InlineKeyboardButton(_selected_label("8s", last_duration == "8"), callback_data="sora_dur_8"),
+        InlineKeyboardButton(_selected_label("12s", last_duration == "12"), callback_data="sora_dur_12"),
     ]]
     await query.edit_message_text(
-        "Sora 2 Pro Step 3/3: Choose duration.",
+        "Sora 2 Pro Step 3/3: Choose duration. (✅ = last used)",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
     return WAITING_SORA_DURATION
@@ -1810,6 +2257,7 @@ async def receive_sora_duration(update: Update, context: ContextTypes.DEFAULT_TY
         return ConversationHandler.END
 
     context.user_data["duration"] = duration
+    set_user_pref(context, query.from_user.id, "sora_duration", duration)
     await query.edit_message_text("Generating Sora 2 Pro video. Please wait...")
 
     payload = dict(context.user_data)
@@ -1841,6 +2289,8 @@ async def receive_sora_duration(update: Update, context: ContextTypes.DEFAULT_TY
                     model_name=(
                         f"Sora 2 Pro ({payload.get('aspect_ratio_label', '?')}, {duration}s)"
                     ),
+                    user_id=query.from_user.id,
+                    task_type="sora_t2v",
                 )
                 return ConversationHandler.END
 
@@ -1881,6 +2331,8 @@ async def receive_sora_duration(update: Update, context: ContextTypes.DEFAULT_TY
             video_url,
             payload,
             model_name=f"Sora 2 Pro ({payload.get('aspect_ratio_label', '?')}, {duration}s)",
+            user_id=query.from_user.id,
+            task_type="sora_t2v",
         )
         return ConversationHandler.END
     except Exception as exc:  # noqa: BLE001
@@ -1898,6 +2350,8 @@ async def send_video_result(
     video_url: str,
     payload: dict,
     model_name: str,
+    user_id: Optional[int] = None,
+    task_type: str = "",
 ) -> None:
     caption = media_caption(
         str(payload.get("prompt", "")),
@@ -1906,11 +2360,17 @@ async def send_video_result(
             f"Model: {model_name}",
         ],
     )
+    reply_markup = (
+        result_action_markup(context, user_id, chat_id, task_type, payload, model_name)
+        if user_id is not None and task_type
+        else None
+    )
     try:
         await context.bot.send_video(
             chat_id=chat_id,
             video=video_url,
             caption=caption,
+            reply_markup=reply_markup,
         )
         return
     except Exception as direct_send_error:  # noqa: BLE001
@@ -1924,6 +2384,7 @@ async def send_video_result(
                 chat_id=chat_id,
                 video=video_file,
                 caption=caption,
+                reply_markup=reply_markup,
             )
         return
     except Exception as upload_error:  # noqa: BLE001
@@ -1940,6 +2401,7 @@ async def send_video_result(
             chat_id=chat_id,
             document=video_url,
             caption=caption,
+            reply_markup=reply_markup,
         )
         return
     except Exception as document_error:  # noqa: BLE001
@@ -1949,6 +2411,7 @@ async def send_video_result(
         await context.bot.send_message(
             chat_id=chat_id,
             text=f"Video ready: {video_url}\n\n{caption}",
+            reply_markup=reply_markup,
         )
     except Exception as message_error:  # noqa: BLE001
         logger.error("Final text fallback failed: %s", message_error)
@@ -1972,6 +2435,8 @@ async def send_image_result(
     image_url: str,
     payload: dict,
     model_name: str,
+    user_id: Optional[int] = None,
+    task_type: str = "",
 ) -> None:
     caption = media_caption(
         str(payload.get("prompt", "")),
@@ -1981,11 +2446,17 @@ async def send_image_result(
             f"Model: {model_name}",
         ],
     )
+    reply_markup = (
+        result_action_markup(context, user_id, chat_id, task_type, payload, model_name)
+        if user_id is not None and task_type
+        else None
+    )
     try:
         await context.bot.send_photo(
             chat_id=chat_id,
             photo=image_url,
             caption=caption,
+            reply_markup=reply_markup,
         )
         return
     except Exception as photo_error:  # noqa: BLE001
@@ -1996,6 +2467,7 @@ async def send_image_result(
             chat_id=chat_id,
             document=image_url,
             caption=caption,
+            reply_markup=reply_markup,
         )
         return
     except Exception as document_error:  # noqa: BLE001
@@ -2004,6 +2476,7 @@ async def send_image_result(
     await context.bot.send_message(
         chat_id=chat_id,
         text=f"Image ready: {image_url}\n\n{caption}",
+        reply_markup=reply_markup,
     )
 
 
@@ -2189,6 +2662,12 @@ def main() -> None:
     app.add_handler(auth_conv)
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(
+        CallbackQueryHandler(
+            result_action_callback,
+            pattern=rf"^({RERUN_CALLBACK_PREFIX}|{VARIATION_CALLBACK_PREFIX})",
+        )
+    )
     app.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^menu_(t2v|i2v|back)$"))
     app.add_handler(t2i_conv)
     app.add_handler(i2v_conv)

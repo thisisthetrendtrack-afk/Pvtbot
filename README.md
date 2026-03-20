@@ -46,6 +46,8 @@ bash start.sh
 - `/generate` - Kling 3.0 motion-control flow
 - `/ltx` - LTX 2.3 text-to-video flow
 - `/generate_ltx` - alias of `/ltx`
+- `/klingt2v` - Kling V3.0 text-to-video flow
+- `/kling_v3_t2v` - alias of `/klingt2v`
 - `/sora` - Sora 2 Pro text-to-video flow
 - `/sora2` - alias of `/sora`
 - `/cancel` - cancel current flow
@@ -97,6 +99,15 @@ Each generation flow now shows live progress updates in chat
 3. Choose aspect ratio (`1:1`, `16:9`, `9:16`)
 4. Bot sends request to ModelsLab `v6/video/text2video_ultra` with `model_id=ltx-2.3`
 5. Bot polls fetch endpoint and returns video when ready
+
+## Kling V3.0 text-to-video flow (`/klingt2v`)
+
+1. Send `/klingt2v`
+2. Enter text prompt
+3. Choose aspect ratio (`1:1`, `9:16`, `16:9`)
+4. Choose duration (`5s`, `10s`)
+5. Bot sends request to ModelsLab `v7/video-fusion/text-to-video` with `model_id=kling-v3-t2v`
+6. Bot polls fetch endpoint and returns video when ready
 
 ## Sora generation flow (`/sora`)
 

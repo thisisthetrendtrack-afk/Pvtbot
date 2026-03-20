@@ -39,6 +39,11 @@ LTX_FETCH_URL_TEMPLATE = "https://modelslab.com/api/v6/video/fetch/{request_id}"
 LTX_MODEL_ID = "ltx-2.3"
 LTX_RESOLUTIONS = ("1:1", "16:9", "9:16")
 
+KLING_V3_T2V_API_URL = "https://modelslab.com/api/v7/video-fusion/text-to-video"
+KLING_V3_T2V_MODEL_ID = "kling-v3-t2v"
+KLING_V3_T2V_ASPECT_RATIOS = ("1:1", "9:16", "16:9")
+KLING_V3_T2V_DURATIONS = ("5", "10")
+
 SORA_API_URL = "https://modelslab.com/api/v7/video-fusion/text-to-video"
 SORA_MODEL_ID = "sora-2-pro-t2v"
 SORA_ASPECT_RATIOS = {
@@ -73,6 +78,9 @@ I2I_MODEL_ID = "gemini-3.1-i2i"
     WAITING_PROMPT,
     WAITING_LTX_PROMPT,
     WAITING_LTX_RESOLUTION,
+    WAITING_KLING_V3_T2V_PROMPT,
+    WAITING_KLING_V3_T2V_ASPECT_RATIO,
+    WAITING_KLING_V3_T2V_DURATION,
     WAITING_SORA_PROMPT,
     WAITING_SORA_ASPECT_RATIO,
     WAITING_SORA_DURATION,
@@ -81,7 +89,7 @@ I2I_MODEL_ID = "gemini-3.1-i2i"
     WAITING_I2I_IMAGE,
     WAITING_I2I_PROMPT,
     WAITING_I2I_ASPECT_RATIO,
-) = range(14)
+) = range(17)
 
 VERIFIED_USERS: set[int] = set()
 
@@ -190,6 +198,10 @@ def help_text() -> str:
         "LTX 2.3 Text-to-Video (/ltx)\n"
         "1) Enter prompt\n"
         "2) Choose aspect ratio (1:1 / 16:9 / 9:16)\n\n"
+        "Kling V3.0 Text-to-Video (/klingt2v)\n"
+        "1) Enter prompt\n"
+        "2) Choose aspect ratio (1:1 / 9:16 / 16:9)\n"
+        "3) Choose duration (5s / 10s)\n\n"
         "Sora 2 Pro Text-to-Video (/sora)\n"
         "1) Enter prompt\n"
         "2) Choose aspect ratio (9:16 / 16:9)\n"
@@ -214,6 +226,12 @@ def text_to_video_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("LTX 2.3 (Text to Video)", callback_data="menu_start_ltx")],
+            [
+                InlineKeyboardButton(
+                    "Kling V3.0 (Text to Video)",
+                    callback_data="menu_start_kling_v3_t2v",
+                )
+            ],
             [InlineKeyboardButton("Sora 2 Pro (Text to Video)", callback_data="menu_start_sora")],
             [InlineKeyboardButton("⬅ Back", callback_data=MENU_BACK_CALLBACK)],
         ]
@@ -280,6 +298,23 @@ def call_modelslab_ltx(settings: Settings, payload: dict) -> dict:
             "resolution": payload["resolution"],
             "negative_prompt": payload.get("negative_prompt", ""),
             "webhook": None,
+            "track_id": None,
+        },
+        timeout=60,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def call_modelslab_kling_v3_t2v(settings: Settings, payload: dict) -> dict:
+    response = requests.post(
+        KLING_V3_T2V_API_URL,
+        json={
+            "key": settings.modelslab_api_key,
+            "prompt": payload["prompt"],
+            "model_id": KLING_V3_T2V_MODEL_ID,
+            "aspect_ratio": payload["aspect_ratio"],
+            "duration": payload["duration"],
             "track_id": None,
         },
         timeout=60,
@@ -1173,6 +1208,172 @@ async def receive_ltx_resolution(update: Update, context: ContextTypes.DEFAULT_T
         return ConversationHandler.END
 
 
+async def kling_v3_t2v_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    if not is_verified(update.effective_user.id, settings):
+        await update.message.reply_text("Send /start and pass access code first.")
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    await update.message.reply_text("Kling V3.0 Step 1/3: Enter your prompt text.")
+    return WAITING_KLING_V3_T2V_PROMPT
+
+
+async def kling_v3_t2v_start_from_menu(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    settings: Settings = context.bot_data["settings"]
+    query = update.callback_query
+    await query.answer()
+
+    if not is_verified(query.from_user.id, settings):
+        await query.edit_message_text("Access required. Send /start first.")
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    await query.edit_message_text("Kling V3.0 Step 1/3: Enter your prompt text.")
+    return WAITING_KLING_V3_T2V_PROMPT
+
+
+async def receive_kling_v3_t2v_prompt(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    prompt = update.message.text.strip()
+    if not prompt:
+        await update.message.reply_text("Prompt cannot be empty. Try again.")
+        return WAITING_KLING_V3_T2V_PROMPT
+
+    context.user_data["prompt"] = prompt
+    keyboard = [[
+        InlineKeyboardButton("1:1", callback_data="kv3_ar_1:1"),
+        InlineKeyboardButton("9:16", callback_data="kv3_ar_9:16"),
+        InlineKeyboardButton("16:9", callback_data="kv3_ar_16:9"),
+    ]]
+    await update.message.reply_text(
+        "Kling V3.0 Step 2/3: Choose aspect ratio.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return WAITING_KLING_V3_T2V_ASPECT_RATIO
+
+
+async def receive_kling_v3_t2v_aspect_ratio(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    query = update.callback_query
+    await query.answer()
+
+    aspect_ratio = query.data.replace("kv3_ar_", "", 1).strip()
+    if aspect_ratio not in KLING_V3_T2V_ASPECT_RATIOS:
+        await query.edit_message_text(
+            "Unsupported aspect ratio. Send /klingt2v to start again."
+        )
+        return ConversationHandler.END
+
+    context.user_data["aspect_ratio"] = aspect_ratio
+    keyboard = [[
+        InlineKeyboardButton("5s", callback_data="kv3_dur_5"),
+        InlineKeyboardButton("10s", callback_data="kv3_dur_10"),
+    ]]
+    await query.edit_message_text(
+        "Kling V3.0 Step 3/3: Choose duration.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return WAITING_KLING_V3_T2V_DURATION
+
+
+async def receive_kling_v3_t2v_duration(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    settings: Settings = context.bot_data["settings"]
+    query = update.callback_query
+    await query.answer()
+
+    duration = query.data.replace("kv3_dur_", "", 1)
+    if duration not in KLING_V3_T2V_DURATIONS:
+        await query.edit_message_text("Unsupported duration. Send /klingt2v to start again.")
+        return ConversationHandler.END
+
+    context.user_data["duration"] = duration
+    await query.edit_message_text("Generating Kling V3.0 video. Please wait...")
+
+    payload = dict(context.user_data)
+    status_message = await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text="⏳ Kling V3.0 Text-to-Video\nStatus: Submitted\nElapsed: 0s",
+    )
+    progress_callback = make_progress_callback(
+        context=context,
+        status_message=status_message,
+        job_title="Kling V3.0 Text-to-Video",
+    )
+
+    try:
+        created = await asyncio.to_thread(call_modelslab_kling_v3_t2v, settings, payload)
+        if str(created.get("status", "")).lower() == "success":
+            output = created.get("output") or []
+            if output:
+                await finalize_progress_message(
+                    context,
+                    status_message,
+                    "✅ Kling V3.0 completed. Sending video...",
+                )
+                await send_video_result(
+                    context,
+                    query.message.chat_id,
+                    output[0],
+                    payload,
+                    model_name=f"Kling V3.0 ({payload.get('aspect_ratio', '?')}, {duration}s)",
+                )
+                return ConversationHandler.END
+
+        request_id = created.get("id") or created.get("request_id")
+        if not request_id:
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"Unexpected ModelsLab response: {created}",
+            )
+            return ConversationHandler.END
+
+        video_url = await poll_result(
+            settings,
+            request_id=request_id,
+            fetch_fn=fetch_result_v7,
+            progress_callback=progress_callback,
+        )
+        if not video_url:
+            await finalize_progress_message(
+                context,
+                status_message,
+                "❌ Kling V3.0 failed or timed out.",
+            )
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="Kling V3.0 generation failed or timed out. Please try /klingt2v again.",
+            )
+            return ConversationHandler.END
+
+        await finalize_progress_message(
+            context,
+            status_message,
+            "✅ Kling V3.0 completed. Sending video...",
+        )
+        await send_video_result(
+            context,
+            query.message.chat_id,
+            video_url,
+            payload,
+            model_name=f"Kling V3.0 ({payload.get('aspect_ratio', '?')}, {duration}s)",
+        )
+        return ConversationHandler.END
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Kling V3.0 API call failed")
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=f"Kling V3.0 API error: {exc}",
+        )
+        return ConversationHandler.END
+
+
 async def sora_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     settings: Settings = context.bot_data["settings"]
     if not is_verified(update.effective_user.id, settings):
@@ -1523,6 +1724,32 @@ def main() -> None:
         allow_reentry=True,
     )
 
+    kling_v3_t2v_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("klingt2v", kling_v3_t2v_start),
+            CommandHandler("kling_v3_t2v", kling_v3_t2v_start),
+            CallbackQueryHandler(
+                kling_v3_t2v_start_from_menu, pattern=r"^menu_start_kling_v3_t2v$"
+            ),
+        ],
+        states={
+            WAITING_KLING_V3_T2V_PROMPT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_kling_v3_t2v_prompt)
+            ],
+            WAITING_KLING_V3_T2V_ASPECT_RATIO: [
+                CallbackQueryHandler(receive_kling_v3_t2v_aspect_ratio, pattern=r"^kv3_ar_")
+            ],
+            WAITING_KLING_V3_T2V_DURATION: [
+                CallbackQueryHandler(receive_kling_v3_t2v_duration, pattern=r"^kv3_dur_")
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            MessageHandler(filters.ALL, fallback_msg),
+        ],
+        allow_reentry=True,
+    )
+
     sora_conv = ConversationHandler(
         entry_points=[
             CommandHandler("sora", sora_start),
@@ -1592,6 +1819,7 @@ def main() -> None:
     app.add_handler(i2i_conv)
     app.add_handler(gen_conv)
     app.add_handler(ltx_conv)
+    app.add_handler(kling_v3_t2v_conv)
     app.add_handler(sora_conv)
 
     logger.info("Bot started. Access code enabled: %s", settings.access_required)

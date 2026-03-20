@@ -44,6 +44,45 @@ KLING_V3_T2V_MODEL_ID = "kling-v3-t2v"
 KLING_V3_T2V_ASPECT_RATIOS = ("1:1", "9:16", "16:9")
 KLING_V3_T2V_DURATIONS = ("5", "10")
 
+I2V_V7_API_URL = "https://modelslab.com/api/v7/video-fusion/image-to-video"
+LTX_I2V_API_URL = "https://modelslab.com/api/v6/video/img2video_ultra"
+I2V_MODELS = {
+    "kling_v3_i2v": {
+        "label": "Kling V3.0 Image-to-Video",
+        "fetch": "v7",
+        "defaults": {"duration": "5", "model_id": "kling-v3-i2v"},
+    },
+    "ltx_pro_i2v": {
+        "label": "LTX 2.3 Pro Image-to-Video",
+        "fetch": "v7",
+        "defaults": {
+            "resolution": "1920x1080",
+            "duration": "6",
+            "generate_audio": True,
+            "fps": "25",
+            "model_id": "ltx-2-3-pro-i2v",
+        },
+    },
+    "ltx_i2v": {
+        "label": "LTX 2.3 Image-to-Video",
+        "fetch": "v6",
+        "defaults": {
+            "resolution": "16:9",
+            "model_id": "ltx-2.3",
+            "base64": "false",
+        },
+    },
+    "grok_i2v": {
+        "label": "Grok Imagine Image-to-Video",
+        "fetch": "v7",
+        "defaults": {
+            "resolution": "720p",
+            "duration": "6",
+            "model_id": "grok-imagine-video-i2v",
+        },
+    },
+}
+
 SORA_API_URL = "https://modelslab.com/api/v7/video-fusion/text-to-video"
 SORA_MODEL_ID = "sora-2-pro-t2v"
 SORA_ASPECT_RATIOS = {
@@ -67,6 +106,28 @@ T2I_ASPECT_RATIOS = (
     "16:9",
     "21:9",
 )
+T2I_RATIO_SHORTLIST = ("1:1", "16:9", "9:16")
+T2I_MODELS = {
+    "nano": {
+        "label": "Nano Banana 2",
+        "endpoint": "v7",
+        "model_id": "gemini-3.1-t2i",
+        "field": "aspect_ratio",
+    },
+    "qwen": {
+        "label": "Qwen Image 2.0 Pro",
+        "endpoint": "v7",
+        "model_id": "qwen-image-2.0-pro-t2i",
+        "field": "size",
+        "size_map": {"1:1": "1328*1328", "16:9": "1664*928", "9:16": "928*1664"},
+    },
+    "seedream": {
+        "label": "Seedream 5.0 Lite",
+        "endpoint": "v7",
+        "model_id": "seedream-5-lite-t2i",
+        "field": "aspect_ratio",
+    },
+}
 
 I2I_API_URL = "https://modelslab.com/api/v7/images/image-to-image"
 I2I_MODEL_ID = "gemini-3.1-i2i"
@@ -76,8 +137,12 @@ I2I_MODEL_ID = "gemini-3.1-i2i"
     WAITING_IMAGE,
     WAITING_VIDEO,
     WAITING_PROMPT,
+    WAITING_T2I_MODEL,
     WAITING_LTX_PROMPT,
     WAITING_LTX_RESOLUTION,
+    WAITING_I2V_MODEL,
+    WAITING_I2V_IMAGE,
+    WAITING_I2V_PROMPT,
     WAITING_KLING_V3_T2V_PROMPT,
     WAITING_KLING_V3_T2V_ASPECT_RATIO,
     WAITING_KLING_V3_T2V_DURATION,
@@ -89,7 +154,7 @@ I2I_MODEL_ID = "gemini-3.1-i2i"
     WAITING_I2I_IMAGE,
     WAITING_I2I_PROMPT,
     WAITING_I2I_ASPECT_RATIO,
-) = range(17)
+) = range(21)
 
 VERIFIED_USERS: set[int] = set()
 
@@ -185,12 +250,17 @@ def help_text() -> str:
     return (
         "How it works:\n\n"
         "Nano Banana 2 Text-to-Image (/t2i)\n"
-        "1) Enter prompt\n"
-        "2) Choose aspect ratio\n\n"
+        "1) Choose model\n"
+        "2) Enter prompt\n"
+        "3) Choose aspect ratio\n\n"
         "Nano Banana 2 Image Edit (/imgedit)\n"
         "1) Upload source image\n"
         "2) Enter edit instruction prompt\n"
         "3) Choose aspect ratio\n\n"
+        "Image-to-Video tools (/i2v)\n"
+        "1) Choose model\n"
+        "2) Upload source image\n"
+        "3) Enter prompt\n\n"
         "Kling Motion Control (/generate)\n"
         "1) Upload character image (PNG/JPG)\n"
         "2) Upload reference motion video (MP4/MOV)\n"
@@ -246,6 +316,33 @@ def image_to_video_keyboard() -> InlineKeyboardMarkup:
                     "Kling 3.0 Motion Control", callback_data="menu_start_kling"
                 )
             ],
+            [InlineKeyboardButton("Kling V3.0 (Image to Video)", callback_data="menu_start_i2v_kling_v3")],
+            [InlineKeyboardButton("LTX 2.3 Pro (Image to Video)", callback_data="menu_start_i2v_ltx_pro")],
+            [InlineKeyboardButton("LTX 2.3 (Image to Video)", callback_data="menu_start_i2v_ltx")],
+            [InlineKeyboardButton("Grok Imagine (Image to Video)", callback_data="menu_start_i2v_grok")],
+            [InlineKeyboardButton("⬅ Back", callback_data=MENU_BACK_CALLBACK)],
+        ]
+    )
+
+
+def i2v_model_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Kling V3.0 Image-to-Video", callback_data="menu_start_i2v_kling_v3")],
+            [InlineKeyboardButton("LTX 2.3 Pro Image-to-Video", callback_data="menu_start_i2v_ltx_pro")],
+            [InlineKeyboardButton("LTX 2.3 Image-to-Video", callback_data="menu_start_i2v_ltx")],
+            [InlineKeyboardButton("Grok Imagine Image-to-Video", callback_data="menu_start_i2v_grok")],
+            [InlineKeyboardButton("⬅ Back", callback_data=MENU_BACK_CALLBACK)],
+        ]
+    )
+
+
+def t2i_model_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Nano Banana 2", callback_data="t2i_model_nano")],
+            [InlineKeyboardButton("Qwen Image 2.0 Pro", callback_data="t2i_model_qwen")],
+            [InlineKeyboardButton("Seedream 5.0 Lite", callback_data="t2i_model_seedream")],
             [InlineKeyboardButton("⬅ Back", callback_data=MENU_BACK_CALLBACK)],
         ]
     )
@@ -341,19 +438,26 @@ def call_modelslab_sora(settings: Settings, payload: dict) -> dict:
 
 
 def call_modelslab_t2i(settings: Settings, payload: dict) -> dict:
-    response = requests.post(
-        T2I_API_URL,
-        json={
+    model_key = payload["t2i_model_key"]
+    model_cfg = T2I_MODELS[model_key]
+
+    if model_cfg["endpoint"] == "v7":
+        body = {
             "key": settings.modelslab_api_key,
             "prompt": payload["prompt"],
-            "model_id": T2I_MODEL_ID,
-            "aspect_ratio": payload["aspect_ratio"],
+            "model_id": model_cfg["model_id"],
             "track_id": None,
-        },
-        timeout=60,
-    )
-    response.raise_for_status()
-    return response.json()
+        }
+        if model_cfg["field"] == "aspect_ratio":
+            body["aspect_ratio"] = payload["aspect_ratio"]
+        else:
+            body["size"] = model_cfg["size_map"][payload["aspect_ratio"]]
+
+        response = requests.post(T2I_API_URL, json=body, timeout=60)
+        response.raise_for_status()
+        return response.json()
+
+    raise RuntimeError(f"Unsupported text-to-image endpoint: {model_cfg['endpoint']}")
 
 
 def call_modelslab_i2i(settings: Settings, payload: dict) -> dict:
@@ -371,6 +475,38 @@ def call_modelslab_i2i(settings: Settings, payload: dict) -> dict:
     )
     response.raise_for_status()
     return response.json()
+
+
+def call_modelslab_i2v(settings: Settings, payload: dict) -> dict:
+    model_key = payload["i2v_model_key"]
+    model_cfg = I2V_MODELS[model_key]
+    defaults = model_cfg["defaults"]
+
+    if model_cfg["fetch"] == "v7":
+        body = {
+            "key": settings.modelslab_api_key,
+            "prompt": payload["prompt"],
+            "init_image": payload["init_image"],
+            "track_id": None,
+            **defaults,
+        }
+        response = requests.post(I2V_V7_API_URL, json=body, timeout=60)
+        response.raise_for_status()
+        return response.json()
+
+    if model_cfg["fetch"] == "v6":
+        body = {
+            "key": settings.modelslab_api_key,
+            "prompt": payload["prompt"],
+            "init_image": payload["init_image"],
+            "track_id": None,
+            **defaults,
+        }
+        response = requests.post(LTX_I2V_API_URL, json=body, timeout=60)
+        response.raise_for_status()
+        return response.json()
+
+    raise RuntimeError(f"Unsupported image-to-video fetch mode: {model_cfg['fetch']}")
 
 
 def fetch_result_v7(settings: Settings, request_id: str) -> dict:
@@ -616,8 +752,11 @@ async def t2i_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ConversationHandler.END
 
     context.user_data.clear()
-    await update.message.reply_text("Text to Image Step 1/2: Enter your prompt text.")
-    return WAITING_T2I_PROMPT
+    await update.message.reply_text(
+        "Text to Image Step 1/3: Choose model.",
+        reply_markup=t2i_model_keyboard(),
+    )
+    return WAITING_T2I_MODEL
 
 
 async def t2i_start_from_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -630,7 +769,25 @@ async def t2i_start_from_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
         return ConversationHandler.END
 
     context.user_data.clear()
-    await query.edit_message_text("Text to Image Step 1/2: Enter your prompt text.")
+    await query.edit_message_text(
+        "Text to Image Step 1/3: Choose model.",
+        reply_markup=t2i_model_keyboard(),
+    )
+    return WAITING_T2I_MODEL
+
+
+async def receive_t2i_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    model_key = query.data.replace("t2i_model_", "", 1)
+    if model_key not in T2I_MODELS:
+        await query.edit_message_text("Unsupported text-to-image model. Send /t2i again.")
+        return ConversationHandler.END
+
+    context.user_data["t2i_model_key"] = model_key
+    await query.edit_message_text(
+        f"Text to Image Step 2/3: Enter prompt for {T2I_MODELS[model_key]['label']}."
+    )
     return WAITING_T2I_PROMPT
 
 
@@ -647,14 +804,9 @@ async def receive_t2i_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
             InlineKeyboardButton("16:9", callback_data="t2i_ar_16:9"),
             InlineKeyboardButton("9:16", callback_data="t2i_ar_9:16"),
         ],
-        [
-            InlineKeyboardButton("4:5", callback_data="t2i_ar_4:5"),
-            InlineKeyboardButton("3:4", callback_data="t2i_ar_3:4"),
-            InlineKeyboardButton("2:3", callback_data="t2i_ar_2:3"),
-        ],
     ]
     await update.message.reply_text(
-        "Text to Image Step 2/2: Choose aspect ratio.",
+        "Text to Image Step 3/3: Choose aspect ratio.",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
     return WAITING_T2I_ASPECT_RATIO
@@ -668,12 +820,20 @@ async def receive_t2i_aspect_ratio(
     await query.answer()
 
     aspect_ratio = query.data.replace("t2i_ar_", "", 1)
-    if aspect_ratio not in T2I_ASPECT_RATIOS:
+    if aspect_ratio not in T2I_RATIO_SHORTLIST:
         await query.edit_message_text("Unsupported aspect ratio. Send /t2i to start again.")
         return ConversationHandler.END
 
+    model_key = context.user_data.get("t2i_model_key", "nano")
+    if model_key not in T2I_MODELS:
+        await query.edit_message_text("Unsupported model. Send /t2i to start again.")
+        return ConversationHandler.END
+
+    context.user_data["t2i_model_key"] = model_key
     context.user_data["aspect_ratio"] = aspect_ratio
-    await query.edit_message_text("Generating image with Nano Banana 2. Please wait...")
+    await query.edit_message_text(
+        f"Generating image with {T2I_MODELS[model_key]['label']}. Please wait..."
+    )
 
     payload = dict(context.user_data)
     status_message = await context.bot.send_message(
@@ -683,7 +843,7 @@ async def receive_t2i_aspect_ratio(
     progress_callback = make_progress_callback(
         context=context,
         status_message=status_message,
-        job_title="Nano Banana 2 Text-to-Image",
+        job_title=f"{T2I_MODELS[model_key]['label']} Text-to-Image",
     )
     try:
         created = await asyncio.to_thread(call_modelslab_t2i, settings, payload)
@@ -700,7 +860,7 @@ async def receive_t2i_aspect_ratio(
                     query.message.chat_id,
                     output[0],
                     payload,
-                    model_name=f"Nano Banana 2 ({aspect_ratio})",
+                    model_name=f"{T2I_MODELS[model_key]['label']} ({aspect_ratio})",
                 )
                 return ConversationHandler.END
 
@@ -741,7 +901,7 @@ async def receive_t2i_aspect_ratio(
             query.message.chat_id,
             image_url,
             payload,
-            model_name=f"Nano Banana 2 ({aspect_ratio})",
+            model_name=f"{T2I_MODELS[model_key]['label']} ({aspect_ratio})",
         )
         return ConversationHandler.END
     except Exception as exc:  # noqa: BLE001
@@ -749,6 +909,198 @@ async def receive_t2i_aspect_ratio(
         await context.bot.send_message(
             chat_id=query.message.chat_id,
             text=f"Text-to-image API error: {exc}",
+        )
+        return ConversationHandler.END
+
+
+async def i2v_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    if not is_verified(update.effective_user.id, settings):
+        await update.message.reply_text("Send /start and pass access code first.")
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    await update.message.reply_text(
+        "Image-to-Video Step 1/3: Choose model.",
+        reply_markup=i2v_model_keyboard(),
+    )
+    return WAITING_I2V_MODEL
+
+
+async def i2v_start_from_menu(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    model_key: str,
+) -> int:
+    settings: Settings = context.bot_data["settings"]
+    query = update.callback_query
+    try:
+        await query.answer()
+    except Exception:  # noqa: BLE001
+        pass
+
+    if not is_verified(query.from_user.id, settings):
+        await query.edit_message_text("Access required. Send /start first.")
+        return ConversationHandler.END
+    if model_key not in I2V_MODELS:
+        await query.edit_message_text("Unsupported image-to-video model.")
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    context.user_data["i2v_model_key"] = model_key
+    await query.edit_message_text(
+        f"{I2V_MODELS[model_key]['label']}\n\nStep 2/3: Send source image (JPG/PNG)."
+    )
+    return WAITING_I2V_IMAGE
+
+
+async def i2v_start_kling_v3(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    return await i2v_start_from_menu(update, context, "kling_v3_i2v")
+
+
+async def i2v_start_ltx_pro(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    return await i2v_start_from_menu(update, context, "ltx_pro_i2v")
+
+
+async def i2v_start_ltx(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    return await i2v_start_from_menu(update, context, "ltx_i2v")
+
+
+async def i2v_start_grok(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    return await i2v_start_from_menu(update, context, "grok_i2v")
+
+
+async def receive_i2v_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    if query.data == MENU_BACK_CALLBACK:
+        await send_main_menu(update)
+        return ConversationHandler.END
+    if query.data == "menu_start_i2v_kling_v3":
+        return await i2v_start_from_menu(update, context, "kling_v3_i2v")
+    if query.data == "menu_start_i2v_ltx_pro":
+        return await i2v_start_from_menu(update, context, "ltx_pro_i2v")
+    if query.data == "menu_start_i2v_ltx":
+        return await i2v_start_from_menu(update, context, "ltx_i2v")
+    if query.data == "menu_start_i2v_grok":
+        return await i2v_start_from_menu(update, context, "grok_i2v")
+    await query.edit_message_text("Unsupported option. Send /i2v and choose again.")
+    return ConversationHandler.END
+
+
+async def receive_i2v_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    model_key = context.user_data.get("i2v_model_key")
+    if model_key not in I2V_MODELS:
+        await update.message.reply_text("Select an image-to-video model again with /i2v.")
+        return ConversationHandler.END
+
+    image_file = None
+    if update.message.photo:
+        image_file = update.message.photo[-1]
+    elif update.message.document and str(update.message.document.mime_type).startswith("image/"):
+        image_file = update.message.document
+
+    if image_file is None:
+        await update.message.reply_text("Please send a JPG/PNG image.")
+        return WAITING_I2V_IMAGE
+
+    tg_file = await context.bot.get_file(image_file.file_id)
+    context.user_data["init_image"] = telegram_file_url(settings, tg_file.file_path)
+    await update.message.reply_text("Image-to-Video Step 3/3: Enter your prompt.")
+    return WAITING_I2V_PROMPT
+
+
+async def receive_i2v_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    model_key = context.user_data.get("i2v_model_key")
+    if model_key not in I2V_MODELS:
+        await update.message.reply_text("Select an image-to-video model again with /i2v.")
+        return ConversationHandler.END
+
+    prompt = update.message.text.strip()
+    if not prompt:
+        await update.message.reply_text("Prompt cannot be empty. Try again.")
+        return WAITING_I2V_PROMPT
+
+    context.user_data["prompt"] = prompt
+    model_label = I2V_MODELS[model_key]["label"]
+    await update.message.reply_text(f"Generating with {model_label}. Please wait...")
+
+    payload = dict(context.user_data)
+    status_message = await context.bot.send_message(
+        chat_id=update.message.chat_id,
+        text=f"⏳ {model_label}\nStatus: Submitted\nElapsed: 0s",
+    )
+    progress_callback = make_progress_callback(
+        context=context,
+        status_message=status_message,
+        job_title=model_label,
+    )
+    try:
+        created = await asyncio.to_thread(call_modelslab_i2v, settings, payload)
+        if str(created.get("status", "")).lower() == "success":
+            output = created.get("output") or []
+            if output:
+                await finalize_progress_message(
+                    context,
+                    status_message,
+                    f"✅ {model_label} completed. Sending video...",
+                )
+                await send_video_result(
+                    context,
+                    update.message.chat_id,
+                    output[0],
+                    payload,
+                    model_name=model_label,
+                )
+                return ConversationHandler.END
+
+        request_id = created.get("id") or created.get("request_id")
+        if not request_id:
+            await context.bot.send_message(
+                chat_id=update.message.chat_id,
+                text=f"Unexpected ModelsLab response: {created}",
+            )
+            return ConversationHandler.END
+
+        fetch_fn = fetch_result_v7 if I2V_MODELS[model_key]["fetch"] == "v7" else fetch_result_v6
+        video_url = await poll_result(
+            settings,
+            request_id=request_id,
+            fetch_fn=fetch_fn,
+            progress_callback=progress_callback,
+        )
+        if not video_url:
+            await finalize_progress_message(
+                context,
+                status_message,
+                f"❌ {model_label} failed or timed out.",
+            )
+            await context.bot.send_message(
+                chat_id=update.message.chat_id,
+                text=f"{model_label} failed or timed out. Please try /i2v again.",
+            )
+            return ConversationHandler.END
+
+        await finalize_progress_message(
+            context,
+            status_message,
+            f"✅ {model_label} completed. Sending video...",
+        )
+        await send_video_result(
+            context,
+            update.message.chat_id,
+            video_url,
+            payload,
+            model_name=model_label,
+        )
+        return ConversationHandler.END
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Image-to-video API call failed")
+        await context.bot.send_message(
+            chat_id=update.message.chat_id,
+            text=f"Image-to-video API error: {exc}",
         )
         return ConversationHandler.END
 
@@ -1779,10 +2131,33 @@ def main() -> None:
             CallbackQueryHandler(t2i_start_from_menu, pattern=r"^menu_t2i$"),
         ],
         states={
+            WAITING_T2I_MODEL: [CallbackQueryHandler(receive_t2i_model, pattern=r"^t2i_model_")],
             WAITING_T2I_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_t2i_prompt)],
             WAITING_T2I_ASPECT_RATIO: [
                 CallbackQueryHandler(receive_t2i_aspect_ratio, pattern=r"^t2i_ar_")
             ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            MessageHandler(filters.ALL, fallback_msg),
+        ],
+        allow_reentry=True,
+    )
+
+    i2v_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("i2v", i2v_start),
+            CallbackQueryHandler(i2v_start_kling_v3, pattern=r"^menu_start_i2v_kling_v3$"),
+            CallbackQueryHandler(i2v_start_ltx_pro, pattern=r"^menu_start_i2v_ltx_pro$"),
+            CallbackQueryHandler(i2v_start_ltx, pattern=r"^menu_start_i2v_ltx$"),
+            CallbackQueryHandler(i2v_start_grok, pattern=r"^menu_start_i2v_grok$"),
+        ],
+        states={
+            WAITING_I2V_MODEL: [
+                CallbackQueryHandler(receive_i2v_model, pattern=r"^(menu_back|menu_start_i2v_)")
+            ],
+            WAITING_I2V_IMAGE: [MessageHandler(filters.PHOTO | filters.Document.ALL, receive_i2v_image)],
+            WAITING_I2V_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_i2v_prompt)],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
@@ -1816,6 +2191,7 @@ def main() -> None:
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^menu_(t2v|i2v|back)$"))
     app.add_handler(t2i_conv)
+    app.add_handler(i2v_conv)
     app.add_handler(i2i_conv)
     app.add_handler(gen_conv)
     app.add_handler(ltx_conv)

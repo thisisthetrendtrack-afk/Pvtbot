@@ -43,6 +43,7 @@ bash start.sh
 - `/text2image` - alias of `/t2i`
 - `/imgedit` - Nano Banana 2 image-edit flow
 - `/imageedit` - alias of `/imgedit`
+- `/i2v` - image-to-video model toolkit (all available i2v models)
 - `/generate` - Kling 3.0 motion-control flow
 - `/ltx` - LTX 2.3 text-to-video flow
 - `/generate_ltx` - alias of `/ltx`
@@ -68,10 +69,13 @@ Each generation flow now shows live progress updates in chat
 ## Text-to-image flow (`/t2i`)
 
 1. Send `/t2i` (or choose **Text to Image** in menu)
-2. Enter text prompt
-3. Choose aspect ratio
-4. Bot calls Nano Banana 2 endpoint (`v7/images/text-to-image`)
-5. Bot sends generated image
+2. Choose model:
+   - Nano Banana 2
+   - Qwen Image 2.0 Pro
+   - Seedream 5.0 Lite
+3. Enter prompt
+4. Choose aspect ratio
+5. Bot calls model endpoint and sends generated image
 
 ## Image-edit flow (`/imgedit`)
 
@@ -91,6 +95,18 @@ Each generation flow now shows live progress updates in chat
 5. Bot sends request to ModelsLab v7 motion-control endpoint
 6. Bot polls fetch endpoint until completion
 7. Bot sends the output video when generation succeeds
+
+## Image-to-video toolkit (`/i2v`)
+
+1. Send `/i2v` (or choose **Image to Video** in menu)
+2. Choose model:
+   - Kling V3.0 Image-to-Video
+   - LTX 2.3 Pro Image-to-Video
+   - LTX 2.3 Image-to-Video
+   - Grok Imagine Image-to-Video
+3. Upload source image
+4. Enter prompt
+5. Bot sends request to model endpoint and returns generated video
 
 ## LTX generation flow (`/ltx`)
 

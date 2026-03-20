@@ -1,355 +1,386 @@
-import os
+"""Telegram bot that connects user media to ModelsLab motion control."""
+
+import asyncio
 import logging
-import requests
+import os
 import time
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from dataclasses import dataclass
+from typing import Optional
+
+import requests
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
-Application,
-CommandHandler,
-MessageHandler,
-CallbackQueryHandler,
-ConversationHandler,
-ContextTypes,
-filters,
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
 )
+
 
 logging.basicConfig(
-format=”%(asctime)s - %(name)s - %(levelname)s - %(message)s”,
-level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
 )
-logger = logging.getLogger(**name**)
+logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN    = os.environ[“TELEGRAM_TOKEN”]
-MODELSLAB_API_KEY = os.environ[“MODELSLAB_API_KEY”]
-ACCESS_CODE       = os.environ.get(“ACCESS_CODE”, “KLING2025”)
+API_URL = "https://modelslab.com/api/v6/video/kling_motion_control"
+FETCH_URL = "https://modelslab.com/api/v6/video/fetch"
 
 (
-WAITING_CODE,
-WAITING_IMAGE,
-WAITING_VIDEO,
-WAITING_PROMPT,
-WAITING_DURATION,
-WAITING_MODE,
+    WAITING_CODE,
+    WAITING_IMAGE,
+    WAITING_VIDEO,
+    WAITING_PROMPT,
+    WAITING_DURATION,
+    WAITING_MODE,
 ) = range(6)
 
-API_URL   = “https://modelslab.com/api/v6/video/kling_motion_control”
-FETCH_URL = “https://modelslab.com/api/v6/video/fetch”
+VERIFIED_USERS: set[int] = set()
 
-VERIFIED_USERS: set = set()
 
-def is_verified(user_id: int) -> bool:
-return user_id in VERIFIED_USERS
+@dataclass(frozen=True)
+class Settings:
+    telegram_token: str
+    modelslab_api_key: str
+    access_code: str
 
-def show_menu_text() -> str:
-return (
-“✅ *Access granted!* Welcome to the bot.\n\n”
-“🎬 *Kling 3.0 Motion Control Bot*\n”
-“Bring your photos to life with AI!\n\n”
-“Commands:\n”
-“• /generate — Start a new video\n”
-“• /help — How to use\n”
-“• /cancel — Cancel current session”
-)
+    @property
+    def access_required(self) -> bool:
+        return bool(self.access_code)
 
-def call_modelslab(image_url, video_url, prompt, duration, mode) -> dict:
-payload = {
-“key”: MODELSLAB_API_KEY,
-“prompt”: prompt,
-“init_image”: image_url,
-“motion_video”: video_url,
-“duration”: duration,
-“motion_mode”: mode,
-“webhook”: None,
-“track_id”: None,
-}
-resp = requests.post(API_URL, json=payload, timeout=60)
-resp.raise_for_status()
-return resp.json()
 
-def poll_result(request_id: str, max_wait: int = 300):
-deadline = time.time() + max_wait
-while time.time() < deadline:
-time.sleep(10)
-r = requests.post(
-FETCH_URL,
-json={“key”: MODELSLAB_API_KEY, “request_id”: request_id},
-timeout=30,
-)
-data = r.json()
-status = data.get(“status”)
-if status == “success”:
-output = data.get(“output”, [])
-return output[0] if output else None
-elif status in (“failed”, “error”):
-logger.error(“Generation failed: %s”, data)
-return None
-return None
+def _required_env(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-user_id = update.effective_user.id
 
-```
-if is_verified(user_id):
-    await update.message.reply_text(show_menu_text(), parse_mode="Markdown")
-    return ConversationHandler.END
-
-await update.message.reply_text(
-    "🔐 *Welcome!*\n\n"
-    "This bot is private. Please enter the *access code* to continue:",
-    parse_mode="Markdown",
-)
-return WAITING_CODE
-```
-
-async def check_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
-entered = update.message.text.strip()
-user_id = update.effective_user.id
-
-```
-if entered == ACCESS_CODE:
-    VERIFIED_USERS.add(user_id)
-    await update.message.reply_text(show_menu_text(), parse_mode="Markdown")
-    return ConversationHandler.END
-else:
-    await update.message.reply_text(
-        "❌ *Wrong code.* Try again or contact the bot owner.",
-        parse_mode="Markdown",
+def load_settings() -> Settings:
+    return Settings(
+        telegram_token=_required_env("TELEGRAM_TOKEN"),
+        modelslab_api_key=_required_env("MODELSLAB_API_KEY"),
+        access_code=os.getenv("ACCESS_CODE", "").strip(),
     )
-    return WAITING_CODE
-```
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-if not is_verified(update.effective_user.id):
-await update.message.reply_text(“🔐 Please send /start and enter the access code first.”)
-return
 
-```
-text = (
-    "📖 *How it works:*\n\n"
-    "1. Send /generate\n"
-    "2. Upload your *character image* (PNG/JPG)\n"
-    "3. Upload a *reference motion video* (MP4/MOV)\n"
-    "4. Type a *prompt* describing the scene\n"
-    "5. Choose *duration* (5 or 10 seconds)\n"
-    "6. Choose *quality mode* (Standard / Pro)\n\n"
-    "The bot will generate a video where your character performs the motions "
-    "from the reference video! ✨\n\n"
-    "⚠️ Generation takes 2-5 minutes. Please be patient."
-)
-await update.message.reply_text(text, parse_mode="Markdown")
-```
+def is_verified(user_id: int, settings: Settings) -> bool:
+    return (not settings.access_required) or user_id in VERIFIED_USERS
 
-async def generate_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-if not is_verified(update.effective_user.id):
-await update.message.reply_text(“🔐 Please send /start and enter the access code first.”)
-return ConversationHandler.END
 
-```
-context.user_data.clear()
-await update.message.reply_text(
-    "📸 *Step 1/5* — Send your *character image* (JPG or PNG).\n\n"
-    "This is the photo whose character will perform the motion.",
-    parse_mode="Markdown",
-)
-return WAITING_IMAGE
-```
-
-async def receive_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-photo = update.message.photo or (
-[update.message.document]
-if update.message.document
-and update.message.document.mime_type in (“image/jpeg”, “image/png”)
-else None
-)
-if not photo:
-await update.message.reply_text(“❌ Please send a JPG or PNG image.”)
-return WAITING_IMAGE
-
-```
-file_obj = photo[-1] if update.message.photo else photo[0]
-file = await context.bot.get_file(file_obj.file_id)
-context.user_data["image_url"] = file.file_path
-
-await update.message.reply_text(
-    "🎥 *Step 2/5* — Now send the *reference motion video* (MP4 or MOV, max 100 MB).\n\n"
-    "The character in your image will copy the motions from this video.",
-    parse_mode="Markdown",
-)
-return WAITING_VIDEO
-```
-
-async def receive_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-video = update.message.video or update.message.document
-if not video:
-await update.message.reply_text(“❌ Please send a video file (MP4 or MOV).”)
-return WAITING_VIDEO
-
-```
-file = await context.bot.get_file(video.file_id)
-context.user_data["video_url"] = file.file_path
-
-await update.message.reply_text(
-    "✍️ *Step 3/5* — Type your *scene prompt*.\n\n"
-    "_Example: A girl dancing on a rooftop at sunset, cinematic, slow motion_",
-    parse_mode="Markdown",
-)
-return WAITING_PROMPT
-```
-
-async def receive_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-context.user_data[“prompt”] = update.message.text.strip()
-
-```
-keyboard = [[
-    InlineKeyboardButton("⏱ 5 seconds", callback_data="dur_5"),
-    InlineKeyboardButton("⏱ 10 seconds", callback_data="dur_10"),
-]]
-await update.message.reply_text(
-    "⏱ *Step 4/5* — Choose video *duration*:",
-    parse_mode="Markdown",
-    reply_markup=InlineKeyboardMarkup(keyboard),
-)
-return WAITING_DURATION
-```
-
-async def receive_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
-query = update.callback_query
-await query.answer()
-context.user_data[“duration”] = int(query.data.split(”_”)[1])
-
-```
-keyboard = [[
-    InlineKeyboardButton("⚡ Standard (faster)", callback_data="mode_std"),
-    InlineKeyboardButton("✨ Pro (better quality)", callback_data="mode_pro"),
-]]
-await query.edit_message_text(
-    "🎨 *Step 5/5* — Choose *quality mode*:\n\n"
-    "• *Standard* — faster, cheaper\n"
-    "• *Pro* — higher quality, more realistic",
-    parse_mode="Markdown",
-    reply_markup=InlineKeyboardMarkup(keyboard),
-)
-return WAITING_MODE
-```
-
-async def receive_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-query = update.callback_query
-await query.answer()
-mode = query.data.split(”_”)[1]
-context.user_data[“mode”] = mode
-
-```
-await query.edit_message_text(
-    "🚀 All set! Generating your video...\n\n"
-    "⏳ This takes 2-5 minutes. I will message you when it is ready!"
-)
-
-ud = context.user_data
-try:
-    result = call_modelslab(
-        image_url=ud["image_url"],
-        video_url=ud["video_url"],
-        prompt=ud["prompt"],
-        duration=ud["duration"],
-        mode=ud["mode"],
+def menu_text() -> str:
+    return (
+        "Access granted.\n\n"
+        "Kling Motion Control Bot\n"
+        "Commands:\n"
+        "/generate - Start a new generation\n"
+        "/help - How to use\n"
+        "/cancel - Cancel current session"
     )
-except Exception as e:
-    logger.error("API error: %s", e)
-    await context.bot.send_message(
-        query.message.chat_id,
-        "❌ API error. Please check your ModelsLab API key and try again.",
+
+
+def help_text() -> str:
+    return (
+        "How it works:\n\n"
+        "1) Send /generate\n"
+        "2) Upload character image (PNG or JPG)\n"
+        "3) Upload reference motion video (MP4/MOV)\n"
+        "4) Enter scene prompt\n"
+        "5) Choose duration\n"
+        "6) Choose mode\n\n"
+        "The bot sends the request to ModelsLab and returns the generated video."
     )
-    return ConversationHandler.END
 
-status = result.get("status")
 
-if status == "success":
-    output = result.get("output", [])
-    if output:
-        await send_video_result(context.bot, query.message.chat_id, output[0], ud)
+def call_modelslab(settings: Settings, payload: dict) -> dict:
+    response = requests.post(
+        API_URL,
+        json={
+            "key": settings.modelslab_api_key,
+            "prompt": payload["prompt"],
+            "init_image": payload["image_url"],
+            "motion_video": payload["video_url"],
+            "duration": payload["duration"],
+            "motion_mode": payload["mode"],
+            "webhook": None,
+            "track_id": None,
+        },
+        timeout=60,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def fetch_result(settings: Settings, request_id: str) -> dict:
+    response = requests.post(
+        FETCH_URL,
+        json={"key": settings.modelslab_api_key, "request_id": request_id},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+async def poll_result(
+    settings: Settings,
+    request_id: str,
+    poll_interval: int = 10,
+    max_wait: int = 420,
+) -> Optional[str]:
+    deadline = time.time() + max_wait
+    while time.time() < deadline:
+        data = await asyncio.to_thread(fetch_result, settings, request_id)
+        status = str(data.get("status", "")).lower()
+        if status == "success":
+            output = data.get("output") or []
+            return output[0] if output else None
+        if status in {"failed", "error"}:
+            logger.error("ModelsLab generation failed: %s", data)
+            return None
+        await asyncio.sleep(poll_interval)
+    return None
+
+
+def mode_display(mode: str) -> str:
+    return "PRO" if mode == "pro" else "STANDARD"
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    user_id = update.effective_user.id
+
+    if is_verified(user_id, settings):
+        await update.message.reply_text(menu_text())
         return ConversationHandler.END
 
-request_id = result.get("id") or result.get("request_id")
-if not request_id:
-    await context.bot.send_message(
-        query.message.chat_id,
-        "❌ Unexpected API response: " + str(result),
+    await update.message.reply_text("This bot is private. Enter access code:")
+    return WAITING_CODE
+
+
+async def check_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    if update.message.text.strip() == settings.access_code:
+        VERIFIED_USERS.add(update.effective_user.id)
+        await update.message.reply_text(menu_text())
+        return ConversationHandler.END
+
+    await update.message.reply_text("Wrong access code. Try again.")
+    return WAITING_CODE
+
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings: Settings = context.bot_data["settings"]
+    if not is_verified(update.effective_user.id, settings):
+        await update.message.reply_text("Send /start and pass access code first.")
+        return
+    await update.message.reply_text(help_text())
+
+
+async def generate_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    if not is_verified(update.effective_user.id, settings):
+        await update.message.reply_text("Send /start and pass access code first.")
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    await update.message.reply_text(
+        "Step 1/5: Send character image (JPG/PNG)."
     )
+    return WAITING_IMAGE
+
+
+async def receive_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    image_file = None
+    if update.message.photo:
+        image_file = update.message.photo[-1]
+    elif update.message.document and update.message.document.mime_type in {
+        "image/jpeg",
+        "image/png",
+    }:
+        image_file = update.message.document
+
+    if image_file is None:
+        await update.message.reply_text("Please send a JPG or PNG image.")
+        return WAITING_IMAGE
+
+    tg_file = await context.bot.get_file(image_file.file_id)
+    context.user_data["image_url"] = tg_file.file_path
+    await update.message.reply_text("Step 2/5: Send reference motion video (MP4/MOV).")
+    return WAITING_VIDEO
+
+
+async def receive_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    video_file = None
+    if update.message.video:
+        video_file = update.message.video
+    elif update.message.document and str(update.message.document.mime_type).startswith("video/"):
+        video_file = update.message.document
+
+    if video_file is None:
+        await update.message.reply_text("Please send a video file (MP4/MOV).")
+        return WAITING_VIDEO
+
+    tg_file = await context.bot.get_file(video_file.file_id)
+    context.user_data["video_url"] = tg_file.file_path
+    await update.message.reply_text("Step 3/5: Enter your prompt text.")
+    return WAITING_PROMPT
+
+
+async def receive_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    prompt = update.message.text.strip()
+    if not prompt:
+        await update.message.reply_text("Prompt cannot be empty. Try again.")
+        return WAITING_PROMPT
+
+    context.user_data["prompt"] = prompt
+    keyboard = [[
+        InlineKeyboardButton("5 seconds", callback_data="dur_5"),
+        InlineKeyboardButton("10 seconds", callback_data="dur_10"),
+    ]]
+    await update.message.reply_text(
+        "Step 4/5: Choose duration.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return WAITING_DURATION
+
+
+async def receive_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    context.user_data["duration"] = int(query.data.split("_")[1])
+
+    keyboard = [[
+        InlineKeyboardButton("Standard", callback_data="mode_std"),
+        InlineKeyboardButton("Pro", callback_data="mode_pro"),
+    ]]
+    await query.edit_message_text(
+        "Step 5/5: Choose quality mode.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return WAITING_MODE
+
+
+async def receive_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    query = update.callback_query
+    await query.answer()
+
+    chosen = query.data.split("_")[1]
+    context.user_data["mode"] = chosen
+    await query.edit_message_text("Generating video with ModelsLab. Please wait...")
+
+    payload = dict(context.user_data)
+    try:
+        created = await asyncio.to_thread(call_modelslab, settings, payload)
+        if str(created.get("status", "")).lower() == "success":
+            output = created.get("output") or []
+            if output:
+                await send_video_result(context, query.message.chat_id, output[0], payload)
+                return ConversationHandler.END
+
+        request_id = created.get("id") or created.get("request_id")
+        if not request_id:
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"Unexpected ModelsLab response: {created}",
+            )
+            return ConversationHandler.END
+
+        video_url = await poll_result(settings, request_id=request_id)
+        if not video_url:
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="Generation failed or timed out. Please try /generate again.",
+            )
+            return ConversationHandler.END
+
+        await send_video_result(context, query.message.chat_id, video_url, payload)
+        return ConversationHandler.END
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("ModelsLab call failed")
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=f"API error: {exc}",
+        )
+        return ConversationHandler.END
+
+
+async def send_video_result(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    video_url: str,
+    payload: dict,
+) -> None:
+    caption = (
+        "Video is ready.\n"
+        f"Prompt: {payload.get('prompt', '')}\n"
+        f"Duration: {payload.get('duration', '?')}s | Mode: {mode_display(payload.get('mode', 'std'))}"
+    )
+    try:
+        await context.bot.send_video(
+            chat_id=chat_id,
+            video=video_url,
+            caption=caption,
+        )
+    except Exception:  # noqa: BLE001
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"Video ready: {video_url}\n\n{caption}",
+        )
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data.clear()
+    await update.message.reply_text("Cancelled. Send /generate to start again.")
     return ConversationHandler.END
 
-video_url = poll_result(request_id)
-if video_url:
-    await send_video_result(context.bot, query.message.chat_id, video_url, ud)
-else:
-    await context.bot.send_message(
-        query.message.chat_id,
-        "⏰ Generation timed out or failed. Please try again with /generate.",
+
+async def fallback_msg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("Follow the steps or send /cancel.")
+
+
+def main() -> None:
+    settings = load_settings()
+    app = Application.builder().token(settings.telegram_token).build()
+    app.bot_data["settings"] = settings
+
+    auth_conv = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            WAITING_CODE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, check_code)
+            ],
+        },
+        fallbacks=[CommandHandler("start", start)],
+        allow_reentry=True,
     )
 
-return ConversationHandler.END
-```
-
-async def send_video_result(bot, chat_id, video_url, ud):
-caption = (
-“✅ *Your video is ready!*\n\n”
-“📝 Prompt: *” + ud.get(“prompt”, “”) + “*\n”
-“⏱ Duration: “ + str(ud.get(“duration”, “?”)) + “s | Mode: “ + ud.get(“mode”, “?”).upper()
-)
-try:
-await bot.send_video(chat_id, video=video_url, caption=caption, parse_mode=“Markdown”)
-except Exception:
-await bot.send_message(
-chat_id,
-“✅ Video ready!\n🔗 “ + video_url + “\n\n” + caption,
-parse_mode=“Markdown”,
-)
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-context.user_data.clear()
-await update.message.reply_text(“❌ Cancelled. Send /generate to start again.”)
-return ConversationHandler.END
-
-async def fallback_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
-await update.message.reply_text(“Please follow the steps, or send /cancel to stop.”)
-
-def main():
-app = Application.builder().token(TELEGRAM_TOKEN).build()
-
-```
-auth_conv = ConversationHandler(
-    entry_points=[CommandHandler("start", start)],
-    states={
-        WAITING_CODE: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, check_code)
+    gen_conv = ConversationHandler(
+        entry_points=[CommandHandler("generate", generate_start)],
+        states={
+            WAITING_IMAGE: [MessageHandler(filters.PHOTO | filters.Document.ALL, receive_image)],
+            WAITING_VIDEO: [MessageHandler(filters.VIDEO | filters.Document.ALL, receive_video)],
+            WAITING_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_prompt)],
+            WAITING_DURATION: [CallbackQueryHandler(receive_duration, pattern=r"^dur_")],
+            WAITING_MODE: [CallbackQueryHandler(receive_mode, pattern=r"^mode_")],
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            MessageHandler(filters.ALL, fallback_msg),
         ],
-    },
-    fallbacks=[CommandHandler("start", start)],
-    allow_reentry=True,
-)
+        allow_reentry=True,
+    )
 
-gen_conv = ConversationHandler(
-    entry_points=[CommandHandler("generate", generate_start)],
-    states={
-        WAITING_IMAGE:    [MessageHandler(filters.PHOTO | filters.Document.ALL, receive_image)],
-        WAITING_VIDEO:    [MessageHandler(filters.VIDEO | filters.Document.ALL, receive_video)],
-        WAITING_PROMPT:   [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_prompt)],
-        WAITING_DURATION: [CallbackQueryHandler(receive_duration, pattern="^dur_")],
-        WAITING_MODE:     [CallbackQueryHandler(receive_mode, pattern="^mode_")],
-    },
-    fallbacks=[
-        CommandHandler("cancel", cancel),
-        MessageHandler(filters.ALL, fallback_msg),
-    ],
-    allow_reentry=True,
-)
+    app.add_handler(auth_conv)
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(gen_conv)
 
-app.add_handler(auth_conv)
-app.add_handler(CommandHandler("help", help_cmd))
-app.add_handler(gen_conv)
+    logger.info("Bot started. Access code enabled: %s", settings.access_required)
+    app.run_polling(drop_pending_updates=True)
 
-logger.info("Bot started. Access code: %s", ACCESS_CODE)
-app.run_polling(drop_pending_updates=True)
-```
 
-if **name** == “**main**”:
-main()
+if __name__ == "__main__":
+    main()

@@ -3,10 +3,12 @@
 import asyncio
 import logging
 import os
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
+from urllib.parse import urlparse
 
 import requests
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -619,11 +621,58 @@ async def send_video_result(
             video=video_url,
             caption=caption,
         )
-    except Exception:  # noqa: BLE001
+        return
+    except Exception as direct_send_error:  # noqa: BLE001
+        logger.warning("Direct video URL send failed: %s", direct_send_error)
+
+    local_file_path: Optional[str] = None
+    try:
+        local_file_path = await asyncio.to_thread(download_video_to_tempfile, video_url)
+        with open(local_file_path, "rb") as video_file:
+            await context.bot.send_video(
+                chat_id=chat_id,
+                video=video_file,
+                caption=caption,
+            )
+        return
+    except Exception as upload_error:  # noqa: BLE001
+        logger.warning("Downloaded video upload failed: %s", upload_error)
+    finally:
+        if local_file_path and os.path.exists(local_file_path):
+            try:
+                os.remove(local_file_path)
+            except OSError:
+                logger.warning("Failed to remove temp file: %s", local_file_path)
+
+    try:
+        await context.bot.send_document(
+            chat_id=chat_id,
+            document=video_url,
+            caption=caption,
+        )
+        return
+    except Exception as document_error:  # noqa: BLE001
+        logger.warning("Document send fallback failed: %s", document_error)
+
+    try:
         await context.bot.send_message(
             chat_id=chat_id,
             text=f"Video ready: {video_url}\n\n{caption}",
         )
+    except Exception as message_error:  # noqa: BLE001
+        logger.error("Final text fallback failed: %s", message_error)
+
+
+def download_video_to_tempfile(video_url: str) -> str:
+    response = requests.get(video_url, stream=True, timeout=120)
+    response.raise_for_status()
+
+    suffix = Path(urlparse(video_url).path).suffix or ".mp4"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+        for chunk in response.iter_content(chunk_size=1024 * 512):
+            if chunk:
+                temp_file.write(chunk)
+        return temp_file.name
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:

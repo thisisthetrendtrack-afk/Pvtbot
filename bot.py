@@ -455,6 +455,19 @@ async def finalize_progress_message(
         pass
 
 
+def truncate_text(value: str, max_len: int) -> str:
+    if len(value) <= max_len:
+        return value
+    if max_len <= 1:
+        return value[:max_len]
+    return value[: max_len - 1] + "…"
+
+
+def media_caption(prompt: str, details: list[str]) -> str:
+    base = "Prompt: " + prompt + "\n" + "\n".join(details)
+    return truncate_text(base, 1024)
+
+
 def telegram_file_url(settings: Settings, file_path: str) -> str:
     if file_path.startswith("http://") or file_path.startswith("https://"):
         return file_path
@@ -1134,10 +1147,12 @@ async def send_video_result(
     payload: dict,
     model_name: str,
 ) -> None:
-    caption = (
-        "Video is ready.\n"
-        f"Prompt: {payload.get('prompt', '')}\n"
-        f"Model: {model_name}"
+    caption = media_caption(
+        str(payload.get("prompt", "")),
+        [
+            "Result: Video",
+            f"Model: {model_name}",
+        ],
     )
     try:
         await context.bot.send_video(
@@ -1206,11 +1221,13 @@ async def send_image_result(
     payload: dict,
     model_name: str,
 ) -> None:
-    caption = (
-        "Image is ready.\n"
-        f"Prompt: {payload.get('prompt', '')}\n"
-        f"Aspect Ratio: {payload.get('aspect_ratio', '?')}\n"
-        f"Model: {model_name}"
+    caption = media_caption(
+        str(payload.get("prompt", "")),
+        [
+            "Result: Image",
+            f"Aspect Ratio: {payload.get('aspect_ratio', '?')}",
+            f"Model: {model_name}",
+        ],
     )
     try:
         await context.bot.send_photo(

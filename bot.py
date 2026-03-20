@@ -9,10 +9,9 @@ from pathlib import Path
 from typing import Optional
 
 import requests
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import Update
 from telegram.ext import (
     Application,
-    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     ConversationHandler,
@@ -27,17 +26,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-API_URL = "https://modelslab.com/api/v6/video/kling_motion_control"
-FETCH_URL = "https://modelslab.com/api/v6/video/fetch"
+API_URL = "https://modelslab.com/api/v7/video-fusion/motion-control"
+FETCH_URL_TEMPLATE = "https://modelslab.com/api/v7/video-fusion/fetch/{request_id}"
+MODEL_ID = "kling-v3-motion-control"
+CHARACTER_ORIENTATION = "image"
 
 (
     WAITING_CODE,
     WAITING_IMAGE,
     WAITING_VIDEO,
     WAITING_PROMPT,
-    WAITING_DURATION,
-    WAITING_MODE,
-) = range(6)
+) = range(4)
 
 VERIFIED_USERS: set[int] = set()
 
@@ -138,9 +137,7 @@ def help_text() -> str:
         "1) Send /generate\n"
         "2) Upload character image (PNG or JPG)\n"
         "3) Upload reference motion video (MP4/MOV)\n"
-        "4) Enter scene prompt\n"
-        "5) Choose duration\n"
-        "6) Choose mode\n\n"
+        "4) Enter scene prompt\n\n"
         "The bot sends the request to ModelsLab and returns the generated video."
     )
 
@@ -152,10 +149,9 @@ def call_modelslab(settings: Settings, payload: dict) -> dict:
             "key": settings.modelslab_api_key,
             "prompt": payload["prompt"],
             "init_image": payload["image_url"],
-            "motion_video": payload["video_url"],
-            "duration": payload["duration"],
-            "motion_mode": payload["mode"],
-            "webhook": None,
+            "init_video": payload["video_url"],
+            "character_orientation": CHARACTER_ORIENTATION,
+            "model_id": MODEL_ID,
             "track_id": None,
         },
         timeout=60,
@@ -166,8 +162,8 @@ def call_modelslab(settings: Settings, payload: dict) -> dict:
 
 def fetch_result(settings: Settings, request_id: str) -> dict:
     response = requests.post(
-        FETCH_URL,
-        json={"key": settings.modelslab_api_key, "request_id": request_id},
+        FETCH_URL_TEMPLATE.format(request_id=request_id),
+        json={"key": settings.modelslab_api_key},
         timeout=30,
     )
     response.raise_for_status()
@@ -194,8 +190,10 @@ async def poll_result(
     return None
 
 
-def mode_display(mode: str) -> str:
-    return "PRO" if mode == "pro" else "STANDARD"
+def telegram_file_url(settings: Settings, file_path: str) -> str:
+    if file_path.startswith("http://") or file_path.startswith("https://"):
+        return file_path
+    return f"https://api.telegram.org/file/bot{settings.telegram_token}/{file_path}"
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -237,12 +235,13 @@ async def generate_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     context.user_data.clear()
     await update.message.reply_text(
-        "Step 1/5: Send character image (JPG/PNG)."
+        "Step 1/3: Send character image (JPG/PNG)."
     )
     return WAITING_IMAGE
 
 
 async def receive_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
     image_file = None
     if update.message.photo:
         image_file = update.message.photo[-1]
@@ -257,12 +256,13 @@ async def receive_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return WAITING_IMAGE
 
     tg_file = await context.bot.get_file(image_file.file_id)
-    context.user_data["image_url"] = tg_file.file_path
-    await update.message.reply_text("Step 2/5: Send reference motion video (MP4/MOV).")
+    context.user_data["image_url"] = telegram_file_url(settings, tg_file.file_path)
+    await update.message.reply_text("Step 2/3: Send reference motion video (MP4/MOV).")
     return WAITING_VIDEO
 
 
 async def receive_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
     video_file = None
     if update.message.video:
         video_file = update.message.video
@@ -274,53 +274,20 @@ async def receive_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return WAITING_VIDEO
 
     tg_file = await context.bot.get_file(video_file.file_id)
-    context.user_data["video_url"] = tg_file.file_path
-    await update.message.reply_text("Step 3/5: Enter your prompt text.")
+    context.user_data["video_url"] = telegram_file_url(settings, tg_file.file_path)
+    await update.message.reply_text("Step 3/3: Enter your prompt text.")
     return WAITING_PROMPT
 
 
 async def receive_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
     prompt = update.message.text.strip()
     if not prompt:
         await update.message.reply_text("Prompt cannot be empty. Try again.")
         return WAITING_PROMPT
 
     context.user_data["prompt"] = prompt
-    keyboard = [[
-        InlineKeyboardButton("5 seconds", callback_data="dur_5"),
-        InlineKeyboardButton("10 seconds", callback_data="dur_10"),
-    ]]
-    await update.message.reply_text(
-        "Step 4/5: Choose duration.",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-    return WAITING_DURATION
-
-
-async def receive_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    context.user_data["duration"] = int(query.data.split("_")[1])
-
-    keyboard = [[
-        InlineKeyboardButton("Standard", callback_data="mode_std"),
-        InlineKeyboardButton("Pro", callback_data="mode_pro"),
-    ]]
-    await query.edit_message_text(
-        "Step 5/5: Choose quality mode.",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-    return WAITING_MODE
-
-
-async def receive_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    settings: Settings = context.bot_data["settings"]
-    query = update.callback_query
-    await query.answer()
-
-    chosen = query.data.split("_")[1]
-    context.user_data["mode"] = chosen
-    await query.edit_message_text("Generating video with ModelsLab. Please wait...")
+    await update.message.reply_text("Generating video with ModelsLab. Please wait...")
 
     payload = dict(context.user_data)
     try:
@@ -328,13 +295,13 @@ async def receive_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         if str(created.get("status", "")).lower() == "success":
             output = created.get("output") or []
             if output:
-                await send_video_result(context, query.message.chat_id, output[0], payload)
+                await send_video_result(context, update.message.chat_id, output[0], payload)
                 return ConversationHandler.END
 
         request_id = created.get("id") or created.get("request_id")
         if not request_id:
             await context.bot.send_message(
-                chat_id=query.message.chat_id,
+                chat_id=update.message.chat_id,
                 text=f"Unexpected ModelsLab response: {created}",
             )
             return ConversationHandler.END
@@ -342,17 +309,17 @@ async def receive_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         video_url = await poll_result(settings, request_id=request_id)
         if not video_url:
             await context.bot.send_message(
-                chat_id=query.message.chat_id,
+                chat_id=update.message.chat_id,
                 text="Generation failed or timed out. Please try /generate again.",
             )
             return ConversationHandler.END
 
-        await send_video_result(context, query.message.chat_id, video_url, payload)
+        await send_video_result(context, update.message.chat_id, video_url, payload)
         return ConversationHandler.END
     except Exception as exc:  # noqa: BLE001
         logger.exception("ModelsLab call failed")
         await context.bot.send_message(
-            chat_id=query.message.chat_id,
+            chat_id=update.message.chat_id,
             text=f"API error: {exc}",
         )
         return ConversationHandler.END
@@ -367,7 +334,7 @@ async def send_video_result(
     caption = (
         "Video is ready.\n"
         f"Prompt: {payload.get('prompt', '')}\n"
-        f"Duration: {payload.get('duration', '?')}s | Mode: {mode_display(payload.get('mode', 'std'))}"
+        f"Model: {MODEL_ID}"
     )
     try:
         await context.bot.send_video(
@@ -423,8 +390,6 @@ def main() -> None:
             WAITING_IMAGE: [MessageHandler(filters.PHOTO | filters.Document.ALL, receive_image)],
             WAITING_VIDEO: [MessageHandler(filters.VIDEO | filters.Document.ALL, receive_video)],
             WAITING_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_prompt)],
-            WAITING_DURATION: [CallbackQueryHandler(receive_duration, pattern=r"^dur_")],
-            WAITING_MODE: [CallbackQueryHandler(receive_mode, pattern=r"^mode_")],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),

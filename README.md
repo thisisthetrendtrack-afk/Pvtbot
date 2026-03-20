@@ -47,6 +47,6 @@ bash start.sh
 2. Upload JPG/PNG image
 3. Upload MP4/MOV reference video
 4. Enter prompt
-5. Choose duration (5/10 sec)
-6. Choose mode (standard/pro)
-7. Bot sends the output video when ModelsLab returns success
+5. Bot sends request to ModelsLab v7 motion-control endpoint
+6. Bot polls fetch endpoint until completion
+7. Bot sends the output video when generation succeeds

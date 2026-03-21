@@ -94,7 +94,6 @@ The bot also includes generation UX improvements:
 4. Bot calls ModelsLab chat-completions endpoint and returns the reply
 5. Conversation memory is saved per user + model for continuity
 6. Use `/llmclear` to reset memory at any time
-7. After each LLM reply, LLM chat closes automatically so it won't intercept prompts meant for image/video tools
 7. Memory is kept in bot runtime (clears when bot restarts)
 
 ## Best LLMs on ModelsLab (recommended)

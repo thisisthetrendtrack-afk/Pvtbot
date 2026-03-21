@@ -1431,16 +1431,14 @@ async def receive_llm_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 f"Memory: {turns} turns\n\n{answer}"
             ),
         )
-        # End LLM conversation after each reply so text prompts for
-        # other tools (e.g. Kling step prompts) are never hijacked.
-        return ConversationHandler.END
+        return WAITING_LLM_PROMPT
     except Exception as exc:  # noqa: BLE001
         logger.exception("LLM API call failed")
         await context.bot.send_message(
             chat_id=update.message.chat_id,
             text=f"LLM API error: {exc}",
         )
-        return ConversationHandler.END
+        return WAITING_LLM_PROMPT
 
 
 async def llm_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1466,7 +1464,7 @@ async def llm_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             await update.message.reply_text(
                 f"Cleared all LLM memory ({removed // 2} turns)."
             )
-    return ConversationHandler.END
+    return WAITING_LLM_PROMPT
 
 
 async def t2i_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -3153,7 +3151,6 @@ def main() -> None:
         )
     )
     app.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^menu_(t2v|i2v|back)$"))
-    app.add_handler(llm_conv)
     app.add_handler(t2i_conv)
     app.add_handler(i2v_conv)
     app.add_handler(i2i_conv)
@@ -3161,6 +3158,9 @@ def main() -> None:
     app.add_handler(ltx_conv)
     app.add_handler(kling_v3_t2v_conv)
     app.add_handler(sora_conv)
+    # Keep LLM handler after generation handlers so active media flows
+    # always capture their own text prompts first.
+    app.add_handler(llm_conv)
 
     logger.info("Bot started. Access code enabled: %s", settings.access_required)
     app.run_polling(drop_pending_updates=True)

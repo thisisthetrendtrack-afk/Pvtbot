@@ -1431,14 +1431,16 @@ async def receive_llm_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 f"Memory: {turns} turns\n\n{answer}"
             ),
         )
-        return WAITING_LLM_PROMPT
+        # End LLM conversation after each reply so text prompts for
+        # other tools (e.g. Kling step prompts) are never hijacked.
+        return ConversationHandler.END
     except Exception as exc:  # noqa: BLE001
         logger.exception("LLM API call failed")
         await context.bot.send_message(
             chat_id=update.message.chat_id,
             text=f"LLM API error: {exc}",
         )
-        return WAITING_LLM_PROMPT
+        return ConversationHandler.END
 
 
 async def llm_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1464,7 +1466,7 @@ async def llm_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             await update.message.reply_text(
                 f"Cleared all LLM memory ({removed // 2} turns)."
             )
-    return WAITING_LLM_PROMPT
+    return ConversationHandler.END
 
 
 async def t2i_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:

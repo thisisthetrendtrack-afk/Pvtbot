@@ -187,6 +187,9 @@ REALTIME_IMG2IMG_API_URL = "https://modelslab.com/api/v6/realtime/img2img"
 FACE_GEN_API_URL = "https://modelslab.com/api/v6/image_editing/face_gen"
 OUTPAINT_API_URL = "https://modelslab.com/api/v6/image_editing/outpaint"
 IMG_MIXER_API_URL = "https://modelslab.com/api/v6/image_editing/img_mixer"
+FACESWAP_API_URL = "https://modelslab.com/api/v6/faceswap/single_face_swap"
+FACESWAP_FETCH_URL_TEMPLATE = "https://modelslab.com/api/v6/faceswap/fetch/{request_id}"
+NSFW_IMAGE_CHECK_API_URL = "https://modelslab.com/api/v3/nsfw_image_check"
 RATIO_TO_SIZE = {
     "1:1": (1024, 1024),
     "16:9": (1344, 768),
@@ -274,7 +277,11 @@ REF_IMAGE_MODELS = {
     WAITING_REF_MODEL,
     WAITING_LLM_MODEL,
     WAITING_LLM_PROMPT,
-) = range(24)
+    WAITING_FACESWAP_INIT_IMAGE,
+    WAITING_FACESWAP_TARGET_IMAGE,
+    WAITING_FACESWAP_REFERENCE_IMAGE,
+    WAITING_NSFW_IMAGE,
+) = range(28)
 
 VERIFIED_USERS: set[int] = set()
 RERUN_CALLBACK_PREFIX = "regen_"
@@ -461,6 +468,16 @@ def help_text() -> str:
         "1) Choose model family\n"
         "2) Ask your question (memory stays in this model thread)\n"
         "Use /llmclear anytime to reset LLM memory\n\n"
+        "Uncensored Chat (/uncensored)\n"
+        "1) Starts instant uncensored chat mode\n"
+        "2) Send your message directly (uses uncensored model memory)\n\n"
+        "Face Swap (/faceswap)\n"
+        "1) Upload base image (face to replace)\n"
+        "2) Upload target image (face source)\n"
+        "3) Upload reference image (which face in base image)\n\n"
+        "NSFW Image Check (/nsfwcheck)\n"
+        "1) Upload image\n"
+        "2) Bot returns safe/NSFW status\n\n"
         "Image-to-Video tools (/i2v)\n"
         "1) Choose model\n"
         "2) Upload source image\n"
@@ -491,8 +508,11 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("🖼 Text to Image (Nano Banana 2)", callback_data="menu_t2i")],
             [InlineKeyboardButton("💬 LLM Chat", callback_data="menu_llm")],
+            [InlineKeyboardButton("🔓 Uncensored Chat", callback_data="menu_uncensored")],
             [InlineKeyboardButton("🪄 Image Edit (Nano Banana 2)", callback_data="menu_i2i")],
             [InlineKeyboardButton("🧭 Reference Image Generate", callback_data="menu_refimg")],
+            [InlineKeyboardButton("🎭 Face Swap", callback_data="menu_faceswap")],
+            [InlineKeyboardButton("🧪 NSFW Image Check", callback_data="menu_nsfw")],
             [InlineKeyboardButton("🎬 Text to Video", callback_data="menu_t2v")],
             [InlineKeyboardButton("🧷 Image to Video", callback_data="menu_i2v")],
         ]
@@ -1022,6 +1042,38 @@ def call_modelslab_i2v(settings: Settings, payload: dict) -> dict:
     raise RuntimeError(f"Unsupported image-to-video fetch mode: {model_cfg['fetch']}")
 
 
+def call_modelslab_faceswap(settings: Settings, payload: dict) -> dict:
+    response = requests.post(
+        FACESWAP_API_URL,
+        json={
+            "key": settings.modelslab_api_key,
+            "init_image": payload["init_image"],
+            "target_image": payload["target_image"],
+            "reference_image": payload["reference_image"],
+            "base64": False,
+            "webhook": None,
+            "track_id": None,
+        },
+        timeout=60,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def call_modelslab_nsfw_check(settings: Settings, init_image: str, threshold: float = 0.5) -> dict:
+    response = requests.post(
+        NSFW_IMAGE_CHECK_API_URL,
+        json={
+            "key": settings.modelslab_api_key,
+            "init_image": init_image,
+            "threshold": threshold,
+        },
+        timeout=45,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
 def fetch_result_v7(settings: Settings, request_id: str) -> dict:
     response = requests.post(
         KLING_FETCH_URL_TEMPLATE.format(request_id=request_id),
@@ -1068,6 +1120,16 @@ def call_modelslab_llm(settings: Settings, payload: dict) -> dict:
 def fetch_result_v6(settings: Settings, request_id: str) -> dict:
     response = requests.post(
         LTX_FETCH_URL_TEMPLATE.format(request_id=request_id),
+        json={"key": settings.modelslab_api_key},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def fetch_result_faceswap(settings: Settings, request_id: str) -> dict:
+    response = requests.post(
+        FACESWAP_FETCH_URL_TEMPLATE.format(request_id=request_id),
         json={"key": settings.modelslab_api_key},
         timeout=30,
     )
@@ -1333,6 +1395,14 @@ def generation_config_from_task(task_type: str, payload: dict) -> dict:
             "job_title": model_cfg["label"],
             "max_wait": 420,
         }
+    if task_type == "faceswap":
+        return {
+            "call": call_modelslab_faceswap,
+            "fetch": fetch_result_faceswap,
+            "kind": "image",
+            "job_title": "Face Swap",
+            "max_wait": 240,
+        }
     raise RuntimeError(f"Unsupported saved task type: {task_type}")
 
 
@@ -1587,6 +1657,48 @@ async def start_shortcut(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     context.user_data.clear()
     await send_main_menu(update)
+
+
+async def uncensored_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    user_id = update.effective_user.id
+    if not is_verified(user_id, settings):
+        await update.message.reply_text("Send /start and pass access code first.")
+        return ConversationHandler.END
+
+    set_user_pref(context, user_id, "llm_model_key", "best")
+    context.user_data.clear()
+    context.user_data["llm_model_key"] = "best"
+    turns = len(get_llm_history(context, user_id, "best")) // 2
+    await update.message.reply_text(
+        "Uncensored Chat started (Llama 3.1 Uncensored).\n"
+        "Send your message now."
+        + (f"\nMemory loaded: {turns} turns." if turns else "")
+        + "\nUse /llmclear to reset memory."
+    )
+    return WAITING_LLM_PROMPT
+
+
+async def uncensored_start_from_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    query = update.callback_query
+    await query.answer()
+
+    if not is_verified(query.from_user.id, settings):
+        await query.edit_message_text("Access required. Send /start first.")
+        return ConversationHandler.END
+
+    set_user_pref(context, query.from_user.id, "llm_model_key", "best")
+    context.user_data.clear()
+    context.user_data["llm_model_key"] = "best"
+    turns = len(get_llm_history(context, query.from_user.id, "best")) // 2
+    await query.edit_message_text(
+        "Uncensored Chat started (Llama 3.1 Uncensored).\n"
+        "Send your message now."
+        + (f"\nMemory loaded: {turns} turns." if turns else "")
+        + "\nUse /llmclear to reset memory."
+    )
+    return WAITING_LLM_PROMPT
 
 
 async def llm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2466,6 +2578,224 @@ async def receive_i2i_aspect_ratio(
         await context.bot.send_message(
             chat_id=query.message.chat_id,
             text=f"{i2i_mode_title(mode)} API error: {exc}",
+        )
+        return ConversationHandler.END
+
+
+async def faceswap_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    user_id = update.effective_user.id
+    if not is_verified(user_id, settings):
+        await update.message.reply_text("Send /start and pass access code first.")
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    await update.message.reply_text(
+        "Face Swap Step 1/3: Send base image (face to replace)."
+    )
+    return WAITING_FACESWAP_INIT_IMAGE
+
+
+async def faceswap_start_from_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    query = update.callback_query
+    await query.answer()
+    if not is_verified(query.from_user.id, settings):
+        await query.edit_message_text("Access required. Send /start first.")
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    await query.edit_message_text(
+        "Face Swap Step 1/3: Send base image (face to replace)."
+    )
+    return WAITING_FACESWAP_INIT_IMAGE
+
+
+async def receive_faceswap_init_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    image_file = None
+    if update.message.photo:
+        image_file = update.message.photo[-1]
+    elif update.message.document and str(update.message.document.mime_type).startswith("image/"):
+        image_file = update.message.document
+    if image_file is None:
+        await update.message.reply_text("Please send an image.")
+        return WAITING_FACESWAP_INIT_IMAGE
+
+    tg_file = await context.bot.get_file(image_file.file_id)
+    context.user_data["init_image"] = telegram_file_url(settings, tg_file.file_path)
+    await update.message.reply_text(
+        "Face Swap Step 2/3: Send target image (face source to insert)."
+    )
+    return WAITING_FACESWAP_TARGET_IMAGE
+
+
+async def receive_faceswap_target_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    image_file = None
+    if update.message.photo:
+        image_file = update.message.photo[-1]
+    elif update.message.document and str(update.message.document.mime_type).startswith("image/"):
+        image_file = update.message.document
+    if image_file is None:
+        await update.message.reply_text("Please send an image.")
+        return WAITING_FACESWAP_TARGET_IMAGE
+
+    tg_file = await context.bot.get_file(image_file.file_id)
+    context.user_data["target_image"] = telegram_file_url(settings, tg_file.file_path)
+    await update.message.reply_text(
+        "Face Swap Step 3/3: Send reference image (which face in base image to swap)."
+    )
+    return WAITING_FACESWAP_REFERENCE_IMAGE
+
+
+async def receive_faceswap_reference_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    image_file = None
+    if update.message.photo:
+        image_file = update.message.photo[-1]
+    elif update.message.document and str(update.message.document.mime_type).startswith("image/"):
+        image_file = update.message.document
+    if image_file is None:
+        await update.message.reply_text("Please send an image.")
+        return WAITING_FACESWAP_REFERENCE_IMAGE
+
+    tg_file = await context.bot.get_file(image_file.file_id)
+    context.user_data["reference_image"] = telegram_file_url(settings, tg_file.file_path)
+    context.user_data["prompt"] = "Face swap"
+    payload = dict(context.user_data)
+
+    status_message = await context.bot.send_message(
+        chat_id=update.message.chat_id,
+        text="⏳ Face Swap\nStatus: Submitted\nElapsed: 0s",
+    )
+    progress_callback = make_progress_callback(
+        context=context,
+        status_message=status_message,
+        job_title="Face Swap",
+    )
+    try:
+        created = await asyncio.to_thread(call_modelslab_faceswap, settings, payload)
+        output = created.get("output") or []
+        image_url: Optional[str] = output[0] if str(created.get("status", "")).lower() == "success" and output else None
+        if not image_url:
+            request_id = created.get("id") or created.get("request_id")
+            if not request_id:
+                await context.bot.send_message(
+                    chat_id=update.message.chat_id,
+                    text=f"Unexpected ModelsLab response: {created}",
+                )
+                return ConversationHandler.END
+            image_url = await poll_result(
+                settings,
+                request_id=request_id,
+                fetch_fn=fetch_result_faceswap,
+                progress_callback=progress_callback,
+                max_wait=240,
+            )
+        if not image_url:
+            await finalize_progress_message(
+                context,
+                status_message,
+                "❌ Face swap failed or timed out.",
+            )
+            await context.bot.send_message(
+                chat_id=update.message.chat_id,
+                text="Face swap failed or timed out. Please try /faceswap again.",
+            )
+            return ConversationHandler.END
+
+        await finalize_progress_message(
+            context,
+            status_message,
+            "✅ Face swap completed. Sending image...",
+        )
+        await send_image_result(
+            context,
+            update.message.chat_id,
+            image_url,
+            payload,
+            model_name="Face Swap",
+            user_id=update.effective_user.id,
+            task_type="faceswap",
+        )
+        return ConversationHandler.END
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Face swap API call failed")
+        await context.bot.send_message(
+            chat_id=update.message.chat_id,
+            text=f"Face swap API error: {exc}",
+        )
+        return ConversationHandler.END
+
+
+async def nsfw_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    if not is_verified(update.effective_user.id, settings):
+        await update.message.reply_text("Send /start and pass access code first.")
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    await update.message.reply_text(
+        "NSFW Check Step 1/1: Send image to check."
+    )
+    return WAITING_NSFW_IMAGE
+
+
+async def nsfw_start_from_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    query = update.callback_query
+    await query.answer()
+    if not is_verified(query.from_user.id, settings):
+        await query.edit_message_text("Access required. Send /start first.")
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    await query.edit_message_text(
+        "NSFW Check Step 1/1: Send image to check."
+    )
+    return WAITING_NSFW_IMAGE
+
+
+async def receive_nsfw_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    image_file = None
+    if update.message.photo:
+        image_file = update.message.photo[-1]
+    elif update.message.document and str(update.message.document.mime_type).startswith("image/"):
+        image_file = update.message.document
+    if image_file is None:
+        await update.message.reply_text("Please send an image.")
+        return WAITING_NSFW_IMAGE
+
+    tg_file = await context.bot.get_file(image_file.file_id)
+    image_url = telegram_file_url(settings, tg_file.file_path)
+    status_message = await context.bot.send_message(
+        chat_id=update.message.chat_id,
+        text="⏳ Checking NSFW safety...",
+    )
+    try:
+        data = await asyncio.to_thread(call_modelslab_nsfw_check, settings, image_url, 0.5)
+        flags = data.get("has_nsfw_concept") or []
+        is_nsfw = any(bool(item) for item in flags) if isinstance(flags, list) else bool(flags)
+        score = data.get("nsfw_score") or data.get("score")
+        result_text = "⚠️ NSFW detected." if is_nsfw else "✅ Image looks safe."
+        details = []
+        if score is not None:
+            details.append(f"Score: {score}")
+        details.append(f"Raw: {truncate_text(str(data), 1200)}")
+        await finalize_progress_message(context, status_message, "✅ NSFW check completed.")
+        await context.bot.send_message(
+            chat_id=update.message.chat_id,
+            text=result_text + "\n" + "\n".join(details),
+        )
+        return ConversationHandler.END
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("NSFW check API call failed")
+        await finalize_progress_message(context, status_message, "❌ NSFW check failed.")
+        await context.bot.send_message(
+            chat_id=update.message.chat_id,
+            text=f"NSFW check API error: {exc}",
         )
         return ConversationHandler.END
 
@@ -3415,7 +3745,9 @@ def main() -> None:
         entry_points=[
             CommandHandler("llm", llm_start),
             CommandHandler("chat", llm_start),
+            CommandHandler("uncensored", uncensored_start),
             CallbackQueryHandler(llm_start_from_menu, pattern=r"^menu_llm$"),
+            CallbackQueryHandler(uncensored_start_from_menu, pattern=r"^menu_uncensored$"),
         ],
         states={
             WAITING_LLM_MODEL: [
@@ -3427,6 +3759,48 @@ def main() -> None:
             CommandHandler("llmclear", llm_clear),
             CommandHandler("newchat", llm_clear),
             CommandHandler("cancel", cancel),
+        ],
+        allow_reentry=True,
+    )
+
+    faceswap_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("faceswap", faceswap_start),
+            CommandHandler("swapface", faceswap_start),
+            CallbackQueryHandler(faceswap_start_from_menu, pattern=r"^menu_faceswap$"),
+        ],
+        states={
+            WAITING_FACESWAP_INIT_IMAGE: [
+                MessageHandler(filters.PHOTO | filters.Document.ALL, receive_faceswap_init_image)
+            ],
+            WAITING_FACESWAP_TARGET_IMAGE: [
+                MessageHandler(filters.PHOTO | filters.Document.ALL, receive_faceswap_target_image)
+            ],
+            WAITING_FACESWAP_REFERENCE_IMAGE: [
+                MessageHandler(filters.PHOTO | filters.Document.ALL, receive_faceswap_reference_image)
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            MessageHandler(filters.ALL, fallback_msg),
+        ],
+        allow_reentry=True,
+    )
+
+    nsfw_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("nsfwcheck", nsfw_start),
+            CommandHandler("nsfw", nsfw_start),
+            CallbackQueryHandler(nsfw_start_from_menu, pattern=r"^menu_nsfw$"),
+        ],
+        states={
+            WAITING_NSFW_IMAGE: [
+                MessageHandler(filters.PHOTO | filters.Document.ALL, receive_nsfw_image)
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            MessageHandler(filters.ALL, fallback_msg),
         ],
         allow_reentry=True,
     )
@@ -3517,6 +3891,8 @@ def main() -> None:
     app.add_handler(t2i_conv)
     app.add_handler(i2v_conv)
     app.add_handler(i2i_conv)
+    app.add_handler(faceswap_conv)
+    app.add_handler(nsfw_conv)
     app.add_handler(gen_conv)
     app.add_handler(ltx_conv)
     app.add_handler(kling_v3_t2v_conv)

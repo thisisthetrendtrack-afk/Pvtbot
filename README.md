@@ -41,6 +41,7 @@ bash start.sh
 - `/help` - usage instructions
 - `/llm` - LLM chat flow (best model selector)
 - `/chat` - alias of `/llm`
+- `/uncensored` - uncensored chat shortcut (direct prompt mode)
 - `/llmclear` - clear saved LLM conversation memory
 - `/newchat` - alias of `/llmclear`
 - `/t2i` - Nano Banana 2 text-to-image flow
@@ -49,6 +50,10 @@ bash start.sh
 - `/imageedit` - alias of `/imgedit`
 - `/refimg` - reference-image toolkit flow (multiple models)
 - `/reference` - alias of `/refimg`
+- `/faceswap` - face swap flow (single face swap)
+- `/swapface` - alias of `/faceswap`
+- `/nsfwcheck` - NSFW image safety checker
+- `/nsfw` - alias of `/nsfwcheck`
 - `/i2v` - image-to-video model toolkit (all available i2v models)
 - `/generate` - Kling 3.0 motion-control flow
 - `/ltx` - LTX 2.3 text-to-video flow
@@ -64,8 +69,11 @@ bash start.sh
 The bot now opens with a professional inline menu containing:
 - **Text to Image**
 - **LLM Chat**
+- **Uncensored Chat**
 - **Image Edit**
 - **Reference Image Generate**
+- **Face Swap**
+- **NSFW Image Check**
 - **Text to Video**
 - **Image to Video**
 
@@ -96,6 +104,13 @@ The bot also includes generation UX improvements:
 6. Use `/llmclear` to reset memory at any time
 7. Memory is kept in bot runtime (clears when bot restarts)
 8. Strict mode: if provider returns a different model than selected, bot blocks that reply (no random switching)
+
+## Uncensored chat flow (`/uncensored`)
+
+1. Send `/uncensored` (or choose **Uncensored Chat** in menu)
+2. Send your message directly (no model picker)
+3. Bot uses uncensored Llama model with memory support
+4. Use `/llmclear` to reset memory
 
 ## Best LLMs on ModelsLab (recommended)
 
@@ -144,6 +159,22 @@ From ModelsLab LLM categories, these are strong picks:
 4. Enter prompt for what to generate while keeping style/identity
 5. Choose aspect ratio
 6. Bot calls the selected reference endpoint and sends generated image
+
+## Face swap flow (`/faceswap`)
+
+1. Send `/faceswap` (or choose **Face Swap** in menu)
+2. Upload base image (face to replace)
+3. Upload target image (face source to insert)
+4. Upload reference image (which face in base image to swap)
+5. Bot calls ModelsLab `v6/faceswap/single_face_swap`
+6. Bot sends swapped image
+
+## NSFW image check flow (`/nsfwcheck`)
+
+1. Send `/nsfwcheck` (or choose **NSFW Image Check** in menu)
+2. Upload image
+3. Bot calls ModelsLab `v3/nsfw_image_check`
+4. Bot returns safety result
 
 ## Kling generation flow (`/generate`)
 

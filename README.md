@@ -137,6 +137,9 @@ From ModelsLab LLM categories, these are strong picks:
    - Qwen Edit 2511
    - Flux Kontext Dev
    - Realtime Image-to-Image
+   - FaceGen
+   - Outpaint
+   - Image Mixer
 3. Upload source/reference image
 4. Enter prompt for what to generate while keeping style/identity
 5. Choose aspect ratio

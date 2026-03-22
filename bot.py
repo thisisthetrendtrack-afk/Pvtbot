@@ -184,6 +184,9 @@ I2I_MODE_REFERENCE = "reference"
 QWEN_EDIT_API_URL = "https://modelslab.com/api/v6/image_editing/qwen_edit"
 FLUX_KONTEXT_API_URL = "https://modelslab.com/api/v6/images/img2img"
 REALTIME_IMG2IMG_API_URL = "https://modelslab.com/api/v6/realtime/img2img"
+FACE_GEN_API_URL = "https://modelslab.com/api/v6/image_editing/face_gen"
+OUTPAINT_API_URL = "https://modelslab.com/api/v6/image_editing/outpaint"
+IMG_MIXER_API_URL = "https://modelslab.com/api/v6/image_editing/img_mixer"
 RATIO_TO_SIZE = {
     "1:1": (1024, 1024),
     "16:9": (1344, 768),
@@ -191,6 +194,14 @@ RATIO_TO_SIZE = {
     "4:5": (896, 1120),
     "3:4": (896, 1152),
     "2:3": (832, 1216),
+}
+FACEGEN_RATIO_TO_SIZE = {
+    "1:1": (512, 512),
+    "16:9": (768, 432),
+    "9:16": (432, 768),
+    "4:5": (512, 640),
+    "3:4": (576, 768),
+    "2:3": (512, 768),
 }
 REF_IMAGE_MODELS = {
     "nano_ref": {
@@ -220,6 +231,21 @@ REF_IMAGE_MODELS = {
         "label": "Realtime Image-to-Image",
         "ux": "Fast",
         "endpoint": "realtime_img2img",
+    },
+    "face_gen": {
+        "label": "FaceGen",
+        "ux": "Identity focus",
+        "endpoint": "face_gen",
+    },
+    "outpaint": {
+        "label": "Outpaint",
+        "ux": "Canvas expand",
+        "endpoint": "outpaint",
+    },
+    "img_mixer": {
+        "label": "Image Mixer",
+        "ux": "Blend style",
+        "endpoint": "img_mixer",
     },
 }
 
@@ -595,6 +621,9 @@ def ref_model_keyboard(selected_key: str = "nano_ref") -> InlineKeyboardMarkup:
         "qwen_edit_2511",
         "flux_kontext",
         "realtime_img2img",
+        "face_gen",
+        "outpaint",
+        "img_mixer",
     ]
     rows = []
     for model_key in order:
@@ -673,6 +702,17 @@ def i2i_mode_title(mode: str) -> str:
 
 def i2i_retry_command(mode: str) -> str:
     return "/refimg" if mode == I2I_MODE_REFERENCE else "/imgedit"
+
+
+def ref_model_prompt_hint(model_key: str) -> str:
+    endpoint = str(REF_IMAGE_MODELS.get(model_key, REF_IMAGE_MODELS["nano_ref"])["endpoint"])
+    if endpoint == "outpaint":
+        return "Describe what should be expanded around the source image."
+    if endpoint == "face_gen":
+        return "Describe style/scene while keeping the same face identity."
+    if endpoint == "img_mixer":
+        return "Describe the blended look you want from this reference style."
+    return "Describe what to generate while keeping style/identity."
 
 
 async def send_main_menu(update: Update) -> None:
@@ -867,6 +907,77 @@ def call_modelslab_reference(settings: Settings, payload: dict) -> dict:
                 "samples": 1,
                 "safety_checker": False,
                 "strength": 0.7,
+                "seed": None,
+                "webhook": None,
+                "track_id": None,
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    if endpoint == "face_gen":
+        face_w, face_h = FACEGEN_RATIO_TO_SIZE.get(str(payload.get("aspect_ratio", "1:1")), (512, 512))
+        response = requests.post(
+            FACE_GEN_API_URL,
+            json={
+                "key": settings.modelslab_api_key,
+                "prompt": payload["prompt"],
+                "face_image": init_image,
+                "negative_prompt": "",
+                "width": face_w,
+                "height": face_h,
+                "samples": 1,
+                "num_inference_steps": 21,
+                "safety_checker": False,
+                "base64": False,
+                "seed": None,
+                "guidance_scale": 7.5,
+                "webhook": None,
+                "track_id": None,
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    if endpoint == "outpaint":
+        response = requests.post(
+            OUTPAINT_API_URL,
+            json={
+                "key": settings.modelslab_api_key,
+                "prompt": payload["prompt"],
+                "image": init_image,
+                "negative_prompt": "",
+                "width": width,
+                "height": height,
+                "overlap_width": 24,
+                "num_inference_steps": 20,
+                "guidance_scale": 8.0,
+                "seed": None,
+                "temp": True,
+                "base64": False,
+                "webhook": None,
+                "track_id": None,
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    if endpoint == "img_mixer":
+        response = requests.post(
+            IMG_MIXER_API_URL,
+            json={
+                "key": settings.modelslab_api_key,
+                "prompt": payload["prompt"],
+                "init_image": [init_image, init_image],
+                "negative_prompt": "",
+                "width": width,
+                "height": height,
+                "steps": 31,
+                "guidance_scale": 8,
+                "samples": 1,
                 "seed": None,
                 "webhook": None,
                 "track_id": None,
@@ -2193,7 +2304,7 @@ async def receive_i2i_image(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     tg_file = await context.bot.get_file(image_file.file_id)
     context.user_data["init_image"] = [telegram_file_url(settings, tg_file.file_path)]
     step_text = (
-        f"Step 3/4: Enter prompt for {model_label} to keep style/identity from this image."
+        f"Step 3/4: Enter prompt for {model_label}. {ref_model_prompt_hint(model_key)}"
         if mode == I2I_MODE_REFERENCE
         else "Step 2/3: Enter edit instruction prompt."
     )

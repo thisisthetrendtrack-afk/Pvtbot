@@ -1287,6 +1287,47 @@ def extract_llm_reply(data: dict) -> str:
     return ""
 
 
+def llm_model_matches_selection(selected_key: str, actual_model: str) -> bool:
+    if selected_key == "best":
+        return True
+    normalized = actual_model.strip().lower()
+    if not normalized:
+        return False
+    expected_tokens = {
+        "chatgpt": ("gpt", "openai"),
+        "claude": ("claude", "anthropic"),
+        "deepseek": ("deepseek",),
+        "llama": ("llama", "meta"),
+        "qwen": ("qwen",),
+        "mistral": ("mistral", "mixtral"),
+    }
+    tokens = expected_tokens.get(selected_key, ())
+    return any(token in normalized for token in tokens)
+
+
+def llm_mismatch_text(selected_key: str, actual_model: str) -> str:
+    selected_name = LLM_MODELS.get(selected_key, {}).get("label", selected_key)
+    return (
+        f"Model mismatch detected.\n"
+        f"Selected: {selected_name}\n"
+        f"Returned: {actual_model or 'unknown'}\n\n"
+        "To avoid random model switching, this reply was blocked.\n"
+        "Try another model option (Qwen/Best) or /llmclear."
+    )
+
+
+async def start_shortcut(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings: Settings = context.bot_data["settings"]
+    user = update.effective_user
+    if not user:
+        return
+    if not is_verified(user.id, settings):
+        await update.message.reply_text("Send /start and pass access code first.")
+        return
+    context.user_data.clear()
+    await send_main_menu(update)
+
+
 async def llm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     settings: Settings = context.bot_data["settings"]
     user_id = update.effective_user.id
@@ -1413,6 +1454,14 @@ async def receive_llm_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
             status_message,
             "✅ LLM reply ready.",
         )
+        used_model = str(data.get("model") or LLM_MODELS[model_key]["model"])
+        if not llm_model_matches_selection(model_key, used_model):
+            await context.bot.send_message(
+                chat_id=update.message.chat_id,
+                text=llm_mismatch_text(model_key, used_model),
+            )
+            return WAITING_LLM_PROMPT
+
         save_llm_turn(
             context,
             user_id,
@@ -1421,7 +1470,6 @@ async def receive_llm_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
             truncate_text(reply_text, 1200),
         )
         turns = len(get_llm_history(context, user_id, model_key)) // 2
-        used_model = str(data.get("model") or LLM_MODELS[model_key]["model"])
         answer = truncate_text(reply_text, 3600)
         await context.bot.send_message(
             chat_id=update.message.chat_id,
@@ -3140,6 +3188,9 @@ def main() -> None:
     )
 
     app.add_handler(auth_conv)
+    app.add_handler(
+        MessageHandler(filters.Regex(r"(?i)^/?start$"), start_shortcut)
+    )
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("llmclear", llm_clear))

@@ -95,6 +95,7 @@ The bot also includes generation UX improvements:
 5. Conversation memory is saved per user + model for continuity
 6. Use `/llmclear` to reset memory at any time
 7. Memory is kept in bot runtime (clears when bot restarts)
+8. Strict mode: if provider returns a different model than selected, bot blocks that reply (no random switching)
 
 ## Best LLMs on ModelsLab (recommended)
 

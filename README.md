@@ -47,7 +47,7 @@ bash start.sh
 - `/text2image` - alias of `/t2i`
 - `/imgedit` - Nano Banana 2 image-edit flow
 - `/imageedit` - alias of `/imgedit`
-- `/refimg` - Nano Banana 2 reference-image generation flow
+- `/refimg` - reference-image toolkit flow (multiple models)
 - `/reference` - alias of `/refimg`
 - `/i2v` - image-to-video model toolkit (all available i2v models)
 - `/generate` - Kling 3.0 motion-control flow
@@ -131,11 +131,16 @@ From ModelsLab LLM categories, these are strong picks:
 ## Reference-image generation flow (`/refimg`)
 
 1. Send `/refimg` (or choose **Reference Image Generate** in menu)
-2. Upload source/reference image
-3. Enter prompt for what to generate while keeping style/identity
-4. Choose aspect ratio
-5. Bot calls Nano Banana 2 image-to-image endpoint (`v7/images/image-to-image`)
-6. Bot sends generated image
+2. Choose model:
+   - Nano Banana 2 Reference
+   - Qwen Edit 2509
+   - Qwen Edit 2511
+   - Flux Kontext Dev
+   - Realtime Image-to-Image
+3. Upload source/reference image
+4. Enter prompt for what to generate while keeping style/identity
+5. Choose aspect ratio
+6. Bot calls the selected reference endpoint and sends generated image
 
 ## Kling generation flow (`/generate`)
 

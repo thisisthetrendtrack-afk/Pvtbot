@@ -181,6 +181,47 @@ I2I_API_URL = "https://modelslab.com/api/v7/images/image-to-image"
 I2I_MODEL_ID = "gemini-3.1-i2i"
 I2I_MODE_EDIT = "edit"
 I2I_MODE_REFERENCE = "reference"
+QWEN_EDIT_API_URL = "https://modelslab.com/api/v6/image_editing/qwen_edit"
+FLUX_KONTEXT_API_URL = "https://modelslab.com/api/v6/images/img2img"
+REALTIME_IMG2IMG_API_URL = "https://modelslab.com/api/v6/realtime/img2img"
+RATIO_TO_SIZE = {
+    "1:1": (1024, 1024),
+    "16:9": (1344, 768),
+    "9:16": (768, 1344),
+    "4:5": (896, 1120),
+    "3:4": (896, 1152),
+    "2:3": (832, 1216),
+}
+REF_IMAGE_MODELS = {
+    "nano_ref": {
+        "label": "Nano Banana 2 Reference",
+        "ux": "Balanced",
+        "endpoint": "v7_i2i",
+    },
+    "qwen_edit_2509": {
+        "label": "Qwen Edit 2509",
+        "ux": "Highest quality",
+        "endpoint": "qwen_edit",
+        "model_id": "qwen-edit-2509",
+    },
+    "qwen_edit_2511": {
+        "label": "Qwen Edit 2511",
+        "ux": "Latest",
+        "endpoint": "qwen_edit",
+        "model_id": "qwen-edit-2511",
+    },
+    "flux_kontext": {
+        "label": "Flux Kontext Dev",
+        "ux": "Style transfer",
+        "endpoint": "flux_kontext",
+        "model_id": "flux-kontext-dev",
+    },
+    "realtime_img2img": {
+        "label": "Realtime Image-to-Image",
+        "ux": "Fast",
+        "endpoint": "realtime_img2img",
+    },
+}
 
 (
     WAITING_CODE,
@@ -204,9 +245,10 @@ I2I_MODE_REFERENCE = "reference"
     WAITING_I2I_IMAGE,
     WAITING_I2I_PROMPT,
     WAITING_I2I_ASPECT_RATIO,
+    WAITING_REF_MODEL,
     WAITING_LLM_MODEL,
     WAITING_LLM_PROMPT,
-) = range(23)
+) = range(24)
 
 VERIFIED_USERS: set[int] = set()
 RERUN_CALLBACK_PREFIX = "regen_"
@@ -385,9 +427,10 @@ def help_text() -> str:
         "2) Enter edit instruction prompt\n"
         "3) Choose aspect ratio\n\n"
         "Reference Image Generate (/refimg)\n"
-        "1) Upload source image\n"
-        "2) Enter prompt to keep style/identity\n"
-        "3) Choose aspect ratio\n\n"
+        "1) Choose reference model\n"
+        "2) Upload source image\n"
+        "3) Enter prompt to keep style/identity\n"
+        "4) Choose aspect ratio\n\n"
         "LLM Chat (/llm)\n"
         "1) Choose model family\n"
         "2) Ask your question (memory stays in this model thread)\n"
@@ -543,6 +586,29 @@ def t2i_model_keyboard(selected_key: str = "") -> InlineKeyboardMarkup:
             [InlineKeyboardButton("⬅ Back", callback_data=MENU_BACK_CALLBACK)],
         ]
     )
+
+
+def ref_model_keyboard(selected_key: str = "nano_ref") -> InlineKeyboardMarkup:
+    order = [
+        "nano_ref",
+        "qwen_edit_2509",
+        "qwen_edit_2511",
+        "flux_kontext",
+        "realtime_img2img",
+    ]
+    rows = []
+    for model_key in order:
+        cfg = REF_IMAGE_MODELS[model_key]
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    _model_button_text(cfg, selected_key == model_key),
+                    callback_data=f"ref_model_{model_key}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton("⬅ Back", callback_data=MENU_BACK_CALLBACK)])
+    return InlineKeyboardMarkup(rows)
 
 
 def llm_model_keyboard(selected_key: str = "") -> InlineKeyboardMarkup:
@@ -730,6 +796,87 @@ def call_modelslab_i2i(settings: Settings, payload: dict) -> dict:
     )
     response.raise_for_status()
     return response.json()
+
+
+def call_modelslab_reference(settings: Settings, payload: dict) -> dict:
+    model_key = str(payload.get("ref_model_key", "nano_ref"))
+    model_cfg = REF_IMAGE_MODELS.get(model_key, REF_IMAGE_MODELS["nano_ref"])
+    endpoint = str(model_cfg["endpoint"])
+    width, height = RATIO_TO_SIZE.get(str(payload.get("aspect_ratio", "1:1")), (1024, 1024))
+    init_images = payload.get("init_image") or []
+    init_image = init_images[0] if init_images else ""
+    if not init_image:
+        raise RuntimeError("Missing init_image for reference generation")
+
+    if endpoint == "v7_i2i":
+        return call_modelslab_i2i(settings, payload)
+
+    if endpoint == "qwen_edit":
+        response = requests.post(
+            QWEN_EDIT_API_URL,
+            json={
+                "key": settings.modelslab_api_key,
+                "prompt": payload["prompt"],
+                "init_image": payload["init_image"],
+                "model_id": model_cfg["model_id"],
+                "safety_checker": True,
+                "base64": False,
+                "webhook": None,
+                "track_id": None,
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    if endpoint == "flux_kontext":
+        response = requests.post(
+            FLUX_KONTEXT_API_URL,
+            json={
+                "key": settings.modelslab_api_key,
+                "model_id": model_cfg["model_id"],
+                "prompt": payload["prompt"],
+                "init_image": init_image,
+                "negative_prompt": "",
+                "num_inference_steps": "28",
+                "safety_checker": True,
+                "strength": "0.5",
+                "guidance": "2.5",
+                "enhance_prompt": None,
+                "width": width,
+                "height": height,
+                "samples": 1,
+                "webhook": None,
+                "track_id": None,
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    if endpoint == "realtime_img2img":
+        response = requests.post(
+            REALTIME_IMG2IMG_API_URL,
+            json={
+                "key": settings.modelslab_api_key,
+                "prompt": payload["prompt"],
+                "negative_prompt": "",
+                "init_image": init_image,
+                "width": width,
+                "height": height,
+                "samples": 1,
+                "safety_checker": False,
+                "strength": 0.7,
+                "seed": None,
+                "webhook": None,
+                "track_id": None,
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    raise RuntimeError(f"Unsupported reference model endpoint: {endpoint}")
 
 
 def call_modelslab_i2v(settings: Settings, payload: dict) -> dict:
@@ -1048,13 +1195,16 @@ def generation_config_from_task(task_type: str, payload: dict) -> dict:
         }
     if task_type == "i2i":
         mode = str(payload.get("i2i_mode", I2I_MODE_EDIT))
-        job_title = (
-            "Nano Banana 2 Reference Image Generate"
-            if mode == I2I_MODE_REFERENCE
-            else "Nano Banana 2 Image Edit"
-        )
+        if mode == I2I_MODE_REFERENCE:
+            ref_key = str(payload.get("ref_model_key", "nano_ref"))
+            ref_cfg = REF_IMAGE_MODELS.get(ref_key, REF_IMAGE_MODELS["nano_ref"])
+            job_title = f"{ref_cfg['label']} Reference Generate"
+            call_fn = call_modelslab_reference
+        else:
+            job_title = "Nano Banana 2 Image Edit"
+            call_fn = call_modelslab_i2i
         return {
-            "call": call_modelslab_i2i,
+            "call": call_fn,
             "fetch": fetch_result_t2i,
             "kind": "image",
             "job_title": job_title,
@@ -1959,13 +2109,21 @@ async def refimg_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         return ConversationHandler.END
 
     last_ratio = get_user_pref(context, user_id, "i2i_aspect_ratio")
+    last_model = get_user_pref(context, user_id, "ref_model_key", "nano_ref")
     context.user_data.clear()
     context.user_data["i2i_mode"] = I2I_MODE_REFERENCE
+    context.user_data["ref_model_key"] = last_model
     await update.message.reply_text(
-        f"{i2i_mode_title(I2I_MODE_REFERENCE)} Step 1/3: Send source image (JPG/PNG)."
-        + (f"\nLast ratio: {last_ratio}" if last_ratio else "")
+        f"{i2i_mode_title(I2I_MODE_REFERENCE)} Step 1/4: Choose model."
+        + (
+            f"\nLast used: {REF_IMAGE_MODELS[last_model]['label']}"
+            if last_model in REF_IMAGE_MODELS
+            else ""
+        )
+        + (f"\nLast ratio: {last_ratio}" if last_ratio else ""),
+        reply_markup=ref_model_keyboard(last_model),
     )
-    return WAITING_I2I_IMAGE
+    return WAITING_REF_MODEL
 
 
 async def refimg_start_from_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1978,11 +2136,41 @@ async def refimg_start_from_menu(update: Update, context: ContextTypes.DEFAULT_T
         return ConversationHandler.END
 
     last_ratio = get_user_pref(context, query.from_user.id, "i2i_aspect_ratio")
+    last_model = get_user_pref(context, query.from_user.id, "ref_model_key", "nano_ref")
     context.user_data.clear()
     context.user_data["i2i_mode"] = I2I_MODE_REFERENCE
+    context.user_data["ref_model_key"] = last_model
     await query.edit_message_text(
-        f"{i2i_mode_title(I2I_MODE_REFERENCE)} Step 1/3: Send source image (JPG/PNG)."
-        + (f"\nLast ratio: {last_ratio}" if last_ratio else "")
+        f"{i2i_mode_title(I2I_MODE_REFERENCE)} Step 1/4: Choose model."
+        + (
+            f"\nLast used: {REF_IMAGE_MODELS[last_model]['label']}"
+            if last_model in REF_IMAGE_MODELS
+            else ""
+        )
+        + (f"\nLast ratio: {last_ratio}" if last_ratio else ""),
+        reply_markup=ref_model_keyboard(last_model),
+    )
+    return WAITING_REF_MODEL
+
+
+async def receive_refimg_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    if query.data == MENU_BACK_CALLBACK:
+        await send_main_menu(update)
+        return ConversationHandler.END
+
+    model_key = query.data.replace("ref_model_", "", 1)
+    if model_key not in REF_IMAGE_MODELS:
+        await query.edit_message_text("Unsupported reference model. Send /refimg again.")
+        return ConversationHandler.END
+
+    set_user_pref(context, query.from_user.id, "ref_model_key", model_key)
+    context.user_data["i2i_mode"] = I2I_MODE_REFERENCE
+    context.user_data["ref_model_key"] = model_key
+    await query.edit_message_text(
+        f"{REF_IMAGE_MODELS[model_key]['label']}\n\n"
+        f"{i2i_mode_title(I2I_MODE_REFERENCE)} Step 2/4: Send source image (JPG/PNG)."
     )
     return WAITING_I2I_IMAGE
 
@@ -2000,10 +2188,12 @@ async def receive_i2i_image(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return WAITING_I2I_IMAGE
 
     mode = str(context.user_data.get("i2i_mode", I2I_MODE_EDIT))
+    model_key = str(context.user_data.get("ref_model_key", "nano_ref"))
+    model_label = REF_IMAGE_MODELS.get(model_key, REF_IMAGE_MODELS["nano_ref"])["label"]
     tg_file = await context.bot.get_file(image_file.file_id)
     context.user_data["init_image"] = [telegram_file_url(settings, tg_file.file_path)]
     step_text = (
-        "Step 2/3: Enter prompt to keep style/identity from this reference image."
+        f"Step 3/4: Enter prompt for {model_label} to keep style/identity from this image."
         if mode == I2I_MODE_REFERENCE
         else "Step 2/3: Enter edit instruction prompt."
     )
@@ -2032,8 +2222,13 @@ async def receive_i2i_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
             InlineKeyboardButton(_selected_label("2:3", last_ratio == "2:3"), callback_data="i2i_ar_2:3"),
         ],
     ]
+    step_title = (
+        f"{i2i_mode_title(mode)} Step 4/4: Choose aspect ratio. (✅ = last used)"
+        if mode == I2I_MODE_REFERENCE
+        else f"{i2i_mode_title(mode)} Step 3/3: Choose aspect ratio. (✅ = last used)"
+    )
     await update.message.reply_text(
-        f"{i2i_mode_title(mode)} Step 3/3: Choose aspect ratio. (✅ = last used)",
+        step_title,
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
     return WAITING_I2I_ASPECT_RATIO
@@ -2056,19 +2251,22 @@ async def receive_i2i_aspect_ratio(
 
     context.user_data["aspect_ratio"] = aspect_ratio
     set_user_pref(context, query.from_user.id, "i2i_aspect_ratio", aspect_ratio)
+    ref_model_key = str(context.user_data.get("ref_model_key", "nano_ref"))
+    ref_cfg = REF_IMAGE_MODELS.get(ref_model_key, REF_IMAGE_MODELS["nano_ref"])
     run_label = (
-        "Generating from reference image with Nano Banana 2"
+        f"Generating from reference image with {ref_cfg['label']}"
         if mode == I2I_MODE_REFERENCE
         else "Editing image with Nano Banana 2"
     )
     await query.edit_message_text(f"{run_label}. Please wait...")
 
     payload = dict(context.user_data)
-    job_title = (
-        "Nano Banana 2 Reference Image Generate"
-        if mode == I2I_MODE_REFERENCE
-        else "Nano Banana 2 Image Edit"
-    )
+    if mode == I2I_MODE_REFERENCE:
+        job_title = f"{ref_cfg['label']} Reference Generate"
+        call_fn = call_modelslab_reference
+    else:
+        job_title = "Nano Banana 2 Image Edit"
+        call_fn = call_modelslab_i2i
     result_model_name = f"{job_title} ({aspect_ratio})"
     success_msg = (
         "✅ Reference generation completed. Sending image..."
@@ -2090,7 +2288,7 @@ async def receive_i2i_aspect_ratio(
         job_title=job_title,
     )
     try:
-        created = await asyncio.to_thread(call_modelslab_i2i, settings, payload)
+        created = await asyncio.to_thread(call_fn, settings, payload)
         if str(created.get("status", "")).lower() == "success":
             output = created.get("output") or []
             if output:
@@ -3174,6 +3372,9 @@ def main() -> None:
             CallbackQueryHandler(refimg_start_from_menu, pattern=r"^menu_refimg$"),
         ],
         states={
+            WAITING_REF_MODEL: [
+                CallbackQueryHandler(receive_refimg_model, pattern=r"^(ref_model_|menu_back)")
+            ],
             WAITING_I2I_IMAGE: [MessageHandler(filters.PHOTO | filters.Document.ALL, receive_i2i_image)],
             WAITING_I2I_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_i2i_prompt)],
             WAITING_I2I_ASPECT_RATIO: [

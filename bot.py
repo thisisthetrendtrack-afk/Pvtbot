@@ -1274,6 +1274,50 @@ def is_weak_style_analysis(analysis: dict) -> bool:
     return False
 
 
+def infer_style_class_from_text(text: str) -> str:
+    value = text.lower()
+    mapping = [
+        ("phone photo", ("smartphone", "phone shot", "mobile photo", "iphone", "selfie")),
+        ("cinematic", ("cinematic", "film still", "movie scene", "dramatic lighting")),
+        ("portrait photography", ("portrait", "headshot", "close-up face", "shallow depth of field")),
+        ("street photography", ("street", "urban", "city night", "documentary")),
+        ("product photography", ("product", "studio backdrop", "catalog", "packshot")),
+        ("editorial fashion", ("fashion", "editorial", "runway", "styled outfit")),
+        ("illustration", ("illustration", "drawing", "sketch", "artwork")),
+        ("anime", ("anime", "manga", "cel-shaded")),
+        ("3d render", ("3d render", "cgi", "rendered")),
+    ]
+    for label, keywords in mapping:
+        if any(keyword in value for keyword in keywords):
+            return label
+    return "natural photography"
+
+
+def fallback_analysis_from_caption(caption_hint: str) -> dict:
+    style_class = infer_style_class_from_text(caption_hint)
+    visual_notes = (
+        "Use natural lighting behavior, realistic textures, authentic lens rendering, "
+        "and physically plausible shadows/highlights."
+    )
+    fidelity_prompt = (
+        "Create a new, non-duplicated image preserving the same visual style and realism quality. "
+        f"Scene details from source: {caption_hint}. "
+        "Keep the mood, material texture fidelity, camera feel, and color rendering consistent, "
+        "while introducing a fresh composition and clearly different framing."
+    )
+    return {
+        "style_class": style_class,
+        "visual_notes": visual_notes,
+        "fidelity_prompt": fidelity_prompt,
+        "quality_rules": [
+            "no plastic or over-smoothed textures",
+            "no synthetic AI artifacts",
+            "maintain realistic lighting and dynamic range",
+            "preserve natural camera feel",
+        ],
+    }
+
+
 def build_styleclone_prompt(analysis: dict) -> str:
     style_class = str(analysis.get("style_class", "unknown")).strip()
     visual_notes = str(analysis.get("visual_notes", "")).strip()
@@ -3139,6 +3183,12 @@ async def receive_styleclone_source_image(update: Update, context: ContextTypes.
                 improved = parse_style_analysis_reply(llm_data)
                 if not is_weak_style_analysis(improved):
                     analysis = improved
+                else:
+                    analysis = fallback_analysis_from_caption(caption_hint)
+            else:
+                analysis = fallback_analysis_from_caption(
+                    "realistic photo with natural lighting, authentic materials, and camera-true rendering"
+                )
 
         prompt = build_styleclone_prompt(analysis)
 

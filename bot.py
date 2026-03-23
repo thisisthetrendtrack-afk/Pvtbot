@@ -1,6 +1,7 @@
 """Telegram bot that connects user media to ModelsLab motion control."""
 
 import asyncio
+import json
 import logging
 import os
 import tempfile
@@ -190,6 +191,8 @@ IMG_MIXER_API_URL = "https://modelslab.com/api/v6/image_editing/img_mixer"
 FACESWAP_API_URL = "https://modelslab.com/api/v6/faceswap/single_face_swap"
 FACESWAP_FETCH_URL_TEMPLATE = "https://modelslab.com/api/v6/faceswap/fetch/{request_id}"
 NSFW_IMAGE_CHECK_API_URL = "https://modelslab.com/api/v3/nsfw_image_check"
+STYLE_ANALYSIS_MODEL_PRIMARY = "openai/gpt-5.4"
+STYLE_ANALYSIS_MODEL_FALLBACK = "openai/gpt-4o"
 RATIO_TO_SIZE = {
     "1:1": (1024, 1024),
     "16:9": (1344, 768),
@@ -281,7 +284,9 @@ REF_IMAGE_MODELS = {
     WAITING_FACESWAP_TARGET_IMAGE,
     WAITING_FACESWAP_REFERENCE_IMAGE,
     WAITING_NSFW_IMAGE,
-) = range(28)
+    WAITING_STYLECLONE_SOURCE_IMAGE,
+    WAITING_STYLECLONE_REFERENCE_IMAGE,
+) = range(30)
 
 VERIFIED_USERS: set[int] = set()
 RERUN_CALLBACK_PREFIX = "regen_"
@@ -464,6 +469,11 @@ def help_text() -> str:
         "2) Upload source image\n"
         "3) Enter prompt to keep style/identity\n"
         "4) Choose aspect ratio\n\n"
+        "Style Fidelity Clone (/styleclone)\n"
+        "1) Upload source image (style to analyze)\n"
+        "2) Bot analyzes style with advanced LLM and builds high-fidelity prompt\n"
+        "3) Upload reference image\n"
+        "4) Bot generates a style-matched clone preserving realism\n\n"
         "LLM Chat (/llm)\n"
         "1) Choose model family\n"
         "2) Ask your question (memory stays in this model thread)\n"
@@ -511,6 +521,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("🔓 Uncensored Chat", callback_data="menu_uncensored")],
             [InlineKeyboardButton("🪄 Image Edit (Nano Banana 2)", callback_data="menu_i2i")],
             [InlineKeyboardButton("🧭 Reference Image Generate", callback_data="menu_refimg")],
+            [InlineKeyboardButton("🧬 Style Fidelity Clone", callback_data="menu_styleclone")],
             [InlineKeyboardButton("🎭 Face Swap", callback_data="menu_faceswap")],
             [InlineKeyboardButton("🧪 NSFW Image Check", callback_data="menu_nsfw")],
             [InlineKeyboardButton("🎬 Text to Video", callback_data="menu_t2v")],
@@ -1074,6 +1085,159 @@ def call_modelslab_nsfw_check(settings: Settings, init_image: str, threshold: fl
     return response.json()
 
 
+def _extract_json_object(value: str) -> Optional[dict]:
+    text = value.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:].strip()
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:  # noqa: BLE001
+        pass
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        parsed = json.loads(text[start : end + 1])
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def call_style_analysis_llm(settings: Settings, image_url: str) -> dict:
+    system_prompt = (
+        "You are a senior visual-style analyst. Analyze image realism and style with strict fidelity.\n"
+        "Return JSON only with keys: style_class, visual_notes, fidelity_prompt, quality_rules.\n"
+        "style_class should be short (e.g. phone photo, cinematic, editorial, anime, 3d render).\n"
+        "visual_notes should be a concise technical summary (lighting, texture, lens feel, noise, realism).\n"
+        "fidelity_prompt must be a detailed generation prompt preserving all important details.\n"
+        "quality_rules must be an array of strict constraints to avoid artificial AI look."
+    )
+    user_text = (
+        "Analyze this image deeply and produce a high-fidelity prompt that preserves visual authenticity.\n"
+        "Focus on lighting, texture realism, camera feel, grain/noise characteristics, dynamic range, color rendering,"
+        " depth, and material details.\n"
+        "Do not stylize away from the source look."
+    )
+    payload = {
+        "model": STYLE_ANALYSIS_MODEL_PRIMARY,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": user_text},
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ],
+            },
+        ],
+        "max_tokens": 900,
+        "temperature": 0.2,
+    }
+    headers = {
+        "Authorization": f"Bearer {settings.modelslab_api_key}",
+        "Content-Type": "application/json",
+    }
+    response = requests.post(
+        LLM_CHAT_API_URL,
+        headers=headers,
+        json=payload,
+        timeout=120,
+    )
+    if response.status_code >= 400:
+        # Fallback if primary thinking model is unavailable on current account.
+        fallback_payload = dict(payload)
+        fallback_payload["model"] = STYLE_ANALYSIS_MODEL_FALLBACK
+        response = requests.post(
+            LLM_CHAT_API_URL,
+            headers=headers,
+            json=fallback_payload,
+            timeout=120,
+        )
+    response.raise_for_status()
+    return response.json()
+
+
+def parse_style_analysis_reply(data: dict) -> dict:
+    content = extract_llm_reply(data)
+    parsed = _extract_json_object(content) if content else None
+    if parsed:
+        style_class = str(parsed.get("style_class", "")).strip() or "unknown"
+        visual_notes = str(parsed.get("visual_notes", "")).strip()
+        fidelity_prompt = str(parsed.get("fidelity_prompt", "")).strip()
+        quality_rules = parsed.get("quality_rules") or []
+        if not isinstance(quality_rules, list):
+            quality_rules = [str(quality_rules)]
+        quality_rules = [str(item).strip() for item in quality_rules if str(item).strip()]
+        if fidelity_prompt:
+            return {
+                "style_class": style_class,
+                "visual_notes": visual_notes,
+                "fidelity_prompt": fidelity_prompt,
+                "quality_rules": quality_rules,
+            }
+
+    return {
+        "style_class": "unknown",
+        "visual_notes": "",
+        "fidelity_prompt": content.strip() if content else "High-fidelity natural reconstruction of source style.",
+        "quality_rules": [],
+    }
+
+
+def build_styleclone_prompt(analysis: dict) -> str:
+    style_class = str(analysis.get("style_class", "unknown")).strip()
+    visual_notes = str(analysis.get("visual_notes", "")).strip()
+    fidelity_prompt = str(analysis.get("fidelity_prompt", "")).strip()
+    quality_rules = analysis.get("quality_rules") or []
+    joined_rules = "\n".join(f"- {rule}" for rule in quality_rules if str(rule).strip())
+    return (
+        f"{fidelity_prompt}\n\n"
+        "Strict matching requirements:\n"
+        f"- Preserve source style class: {style_class}\n"
+        f"- Preserve camera realism and authenticity: {visual_notes or 'match source camera feel'}\n"
+        "- Keep natural texture, lighting physics, and realistic dynamic range\n"
+        "- Keep reference image framing and composition as close as possible\n"
+        "- Avoid synthetic/plastic/overprocessed AI look\n"
+        + (f"{joined_rules}\n" if joined_rules else "")
+    ).strip()
+
+
+def call_modelslab_styleclone(settings: Settings, payload: dict) -> dict:
+    source_image = str(payload["source_image"])
+    reference_image = str(payload["reference_image"])
+    prompt = str(payload["prompt"])
+    response = requests.post(
+        IMG_MIXER_API_URL,
+        json={
+            "key": settings.modelslab_api_key,
+            "prompt": prompt,
+            # First image anchors composition (reference), second image injects source style.
+            "init_image": [reference_image, source_image],
+            "negative_prompt": (
+                "cgi, synthetic skin, fake textures, plastic look, oversharpening, over-smoothing, "
+                "cartoonish, painterly, low detail, low dynamic range, blurry artifacts"
+            ),
+            "width": 1024,
+            "height": 1024,
+            "steps": 41,
+            "guidance_scale": 8,
+            "samples": 1,
+            "seed": None,
+            "webhook": None,
+            "track_id": None,
+        },
+        timeout=90,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
 def fetch_result_v7(settings: Settings, request_id: str) -> dict:
     response = requests.post(
         KLING_FETCH_URL_TEMPLATE.format(request_id=request_id),
@@ -1135,6 +1299,17 @@ def fetch_result_faceswap(settings: Settings, request_id: str) -> dict:
     )
     response.raise_for_status()
     return response.json()
+
+
+def fetch_result_image_editing(settings: Settings, request_id: str) -> dict:
+    response = requests.post(
+        f"https://modelslab.com/api/v6/image_editing/fetch/{request_id}",
+        json={"key": settings.modelslab_api_key},
+        timeout=30,
+    )
+    if response.status_code < 400:
+        return response.json()
+    return fetch_result_t2i(settings, request_id)
 
 
 def fetch_result_t2i(settings: Settings, request_id: str) -> dict:
@@ -1402,6 +1577,14 @@ def generation_config_from_task(task_type: str, payload: dict) -> dict:
             "kind": "image",
             "job_title": "Face Swap",
             "max_wait": 240,
+        }
+    if task_type == "styleclone":
+        return {
+            "call": call_modelslab_styleclone,
+            "fetch": fetch_result_image_editing,
+            "kind": "image",
+            "job_title": "Style Fidelity Clone",
+            "max_wait": 300,
         }
     raise RuntimeError(f"Unsupported saved task type: {task_type}")
 
@@ -2800,6 +2983,182 @@ async def receive_nsfw_image(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return ConversationHandler.END
 
 
+async def styleclone_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    if not is_verified(update.effective_user.id, settings):
+        await update.message.reply_text("Send /start and pass access code first.")
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    await update.message.reply_text(
+        "Style Fidelity Clone Step 1/3: Send source image to analyze style."
+    )
+    return WAITING_STYLECLONE_SOURCE_IMAGE
+
+
+async def styleclone_start_from_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    query = update.callback_query
+    await query.answer()
+    if not is_verified(query.from_user.id, settings):
+        await query.edit_message_text("Access required. Send /start first.")
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    await query.edit_message_text(
+        "Style Fidelity Clone Step 1/3: Send source image to analyze style."
+    )
+    return WAITING_STYLECLONE_SOURCE_IMAGE
+
+
+async def receive_styleclone_source_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    image_file = None
+    if update.message.photo:
+        image_file = update.message.photo[-1]
+    elif update.message.document and str(update.message.document.mime_type).startswith("image/"):
+        image_file = update.message.document
+    if image_file is None:
+        await update.message.reply_text("Please send an image.")
+        return WAITING_STYLECLONE_SOURCE_IMAGE
+
+    tg_file = await context.bot.get_file(image_file.file_id)
+    source_image = telegram_file_url(settings, tg_file.file_path)
+    context.user_data["source_image"] = source_image
+
+    status_message = await context.bot.send_message(
+        chat_id=update.message.chat_id,
+        text="⏳ Analyzing source style with advanced LLM (GPT-5.4 thinking, fallback GPT-4o)...",
+    )
+    try:
+        llm_data = await asyncio.to_thread(call_style_analysis_llm, settings, source_image)
+        analysis = parse_style_analysis_reply(llm_data)
+        prompt = build_styleclone_prompt(analysis)
+        context.user_data["style_analysis"] = analysis
+        context.user_data["prompt"] = prompt
+
+        await finalize_progress_message(
+            context,
+            status_message,
+            "✅ Style analysis complete.",
+        )
+        await context.bot.send_message(
+            chat_id=update.message.chat_id,
+            text=(
+                f"Detected style: {analysis.get('style_class', 'unknown')}\n\n"
+                f"Generated fidelity prompt:\n{truncate_text(prompt, 3000)}\n\n"
+                "Step 2/3: Send reference image for frame/composition matching."
+            ),
+        )
+        return WAITING_STYLECLONE_REFERENCE_IMAGE
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Style analysis failed")
+        await finalize_progress_message(
+            context,
+            status_message,
+            "❌ Style analysis failed.",
+        )
+        await context.bot.send_message(
+            chat_id=update.message.chat_id,
+            text=f"Style analysis error: {exc}",
+        )
+        return ConversationHandler.END
+
+
+async def receive_styleclone_reference_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    image_file = None
+    if update.message.photo:
+        image_file = update.message.photo[-1]
+    elif update.message.document and str(update.message.document.mime_type).startswith("image/"):
+        image_file = update.message.document
+    if image_file is None:
+        await update.message.reply_text("Please send an image.")
+        return WAITING_STYLECLONE_REFERENCE_IMAGE
+
+    source_image = str(context.user_data.get("source_image", "")).strip()
+    prompt = str(context.user_data.get("prompt", "")).strip()
+    if not source_image or not prompt:
+        await update.message.reply_text("Missing source analysis context. Send /styleclone and start again.")
+        return ConversationHandler.END
+
+    tg_file = await context.bot.get_file(image_file.file_id)
+    reference_image = telegram_file_url(settings, tg_file.file_path)
+    context.user_data["reference_image"] = reference_image
+    payload = {
+        "source_image": source_image,
+        "reference_image": reference_image,
+        "prompt": prompt,
+    }
+    status_message = await context.bot.send_message(
+        chat_id=update.message.chat_id,
+        text="⏳ Style Fidelity Clone\nStatus: Submitted\nElapsed: 0s",
+    )
+    progress_callback = make_progress_callback(
+        context=context,
+        status_message=status_message,
+        job_title="Style Fidelity Clone",
+    )
+    try:
+        created = await asyncio.to_thread(call_modelslab_styleclone, settings, payload)
+        output = created.get("output") or []
+        image_url: Optional[str] = output[0] if str(created.get("status", "")).lower() == "success" and output else None
+        if not image_url:
+            request_id = created.get("id") or created.get("request_id")
+            if not request_id:
+                await context.bot.send_message(
+                    chat_id=update.message.chat_id,
+                    text=f"Unexpected ModelsLab response: {created}",
+                )
+                return ConversationHandler.END
+            image_url = await poll_result(
+                settings,
+                request_id=request_id,
+                fetch_fn=fetch_result_image_editing,
+                progress_callback=progress_callback,
+                max_wait=300,
+            )
+        if not image_url:
+            await finalize_progress_message(
+                context,
+                status_message,
+                "❌ Style clone failed or timed out.",
+            )
+            await context.bot.send_message(
+                chat_id=update.message.chat_id,
+                text="Style clone failed or timed out. Please try /styleclone again.",
+            )
+            return ConversationHandler.END
+
+        await finalize_progress_message(
+            context,
+            status_message,
+            "✅ Style clone completed. Sending image...",
+        )
+        await send_image_result(
+            context,
+            update.message.chat_id,
+            image_url,
+            payload,
+            model_name="Style Fidelity Clone",
+            user_id=update.effective_user.id,
+            task_type="styleclone",
+        )
+        return ConversationHandler.END
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Style clone API call failed")
+        await finalize_progress_message(
+            context,
+            status_message,
+            "❌ Style clone failed.",
+        )
+        await context.bot.send_message(
+            chat_id=update.message.chat_id,
+            text=f"Style clone API error: {exc}",
+        )
+        return ConversationHandler.END
+
+
 async def generate_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     settings: Settings = context.bot_data["settings"]
     if not is_verified(update.effective_user.id, settings):
@@ -3805,6 +4164,27 @@ def main() -> None:
         allow_reentry=True,
     )
 
+    styleclone_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("styleclone", styleclone_start),
+            CommandHandler("cloneimg", styleclone_start),
+            CallbackQueryHandler(styleclone_start_from_menu, pattern=r"^menu_styleclone$"),
+        ],
+        states={
+            WAITING_STYLECLONE_SOURCE_IMAGE: [
+                MessageHandler(filters.PHOTO | filters.Document.ALL, receive_styleclone_source_image)
+            ],
+            WAITING_STYLECLONE_REFERENCE_IMAGE: [
+                MessageHandler(filters.PHOTO | filters.Document.ALL, receive_styleclone_reference_image)
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            MessageHandler(filters.ALL, fallback_msg),
+        ],
+        allow_reentry=True,
+    )
+
     t2i_conv = ConversationHandler(
         entry_points=[
             CommandHandler("t2i", t2i_start),
@@ -3893,6 +4273,7 @@ def main() -> None:
     app.add_handler(i2i_conv)
     app.add_handler(faceswap_conv)
     app.add_handler(nsfw_conv)
+    app.add_handler(styleclone_conv)
     app.add_handler(gen_conv)
     app.add_handler(ltx_conv)
     app.add_handler(kling_v3_t2v_conv)

@@ -50,6 +50,8 @@ bash start.sh
 - `/imageedit` - alias of `/imgedit`
 - `/refimg` - reference-image toolkit flow (multiple models)
 - `/reference` - alias of `/refimg`
+- `/styleclone` - style fidelity clone flow (LLM vision + reference render)
+- `/cloneimg` - alias of `/styleclone`
 - `/faceswap` - face swap flow (single face swap)
 - `/swapface` - alias of `/faceswap`
 - `/nsfwcheck` - NSFW image safety checker
@@ -72,6 +74,7 @@ The bot now opens with a professional inline menu containing:
 - **Uncensored Chat**
 - **Image Edit**
 - **Reference Image Generate**
+- **Style Fidelity Clone**
 - **Face Swap**
 - **NSFW Image Check**
 - **Text to Video**
@@ -159,6 +162,15 @@ From ModelsLab LLM categories, these are strong picks:
 4. Enter prompt for what to generate while keeping style/identity
 5. Choose aspect ratio
 6. Bot calls the selected reference endpoint and sends generated image
+
+## Style fidelity clone flow (`/styleclone`)
+
+1. Send `/styleclone` (or choose **Style Fidelity Clone** in menu)
+2. Upload source image (style to analyze)
+3. Bot analyzes style/depth/realism with advanced LLM (`GPT-5.4` requested, fallback `GPT-4o` when unavailable)
+4. Bot generates a high-fidelity preservation prompt
+5. Upload reference image (frame/composition anchor)
+6. Bot generates an output image matching source style quality and reference framing as closely as possible
 
 ## Face swap flow (`/faceswap`)
 

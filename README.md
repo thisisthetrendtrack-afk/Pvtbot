@@ -166,11 +166,11 @@ From ModelsLab LLM categories, these are strong picks:
 ## Style fidelity clone flow (`/styleclone`)
 
 1. Send `/styleclone` (or choose **Style Fidelity Clone** in menu)
-2. Upload source image (style to analyze)
+2. Upload style-reference image (look/quality style to analyze)
 3. Bot analyzes style/depth/realism with advanced LLM (`GPT-5.4` requested, fallback `GPT-4o` when unavailable)
-4. Bot generates a high-fidelity preservation prompt
-5. Upload reference image (frame/composition anchor)
-6. Bot generates an output image matching source style quality and reference framing as closely as possible
+4. Bot generates a high-fidelity style prompt designed to keep style authenticity but avoid direct copying
+5. Upload specific subject image (face photo recommended)
+6. Bot generates an output image that applies the analyzed style to the subject while keeping realistic quality
 
 ## Face swap flow (`/faceswap`)
 

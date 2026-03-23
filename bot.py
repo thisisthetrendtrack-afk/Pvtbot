@@ -1115,14 +1115,15 @@ def call_style_analysis_llm(settings: Settings, image_url: str) -> dict:
         "Return JSON only with keys: style_class, visual_notes, fidelity_prompt, quality_rules.\n"
         "style_class should be short (e.g. phone photo, cinematic, editorial, anime, 3d render).\n"
         "visual_notes should be a concise technical summary (lighting, texture, lens feel, noise, realism).\n"
-        "fidelity_prompt must be a detailed generation prompt preserving all important details.\n"
-        "quality_rules must be an array of strict constraints to avoid artificial AI look."
+        "fidelity_prompt must be a detailed generation prompt preserving style details while creating a NEW image,\n"
+        "not a direct copy. quality_rules must be strict constraints to avoid artificial AI look."
     )
     user_text = (
-        "Analyze this image deeply and produce a high-fidelity prompt that preserves visual authenticity.\n"
+        "Analyze this style-reference image deeply and produce a high-fidelity prompt that preserves visual authenticity.\n"
         "Focus on lighting, texture realism, camera feel, grain/noise characteristics, dynamic range, color rendering,"
         " depth, and material details.\n"
-        "Do not stylize away from the source look."
+        "Important: output should feel different from this image (new framing/composition/scene details),"
+        " but keep the same style DNA and realism level."
     )
     payload = {
         "model": STYLE_ANALYSIS_MODEL_PRIMARY,
@@ -1202,26 +1203,53 @@ def build_styleclone_prompt(analysis: dict) -> str:
         f"- Preserve source style class: {style_class}\n"
         f"- Preserve camera realism and authenticity: {visual_notes or 'match source camera feel'}\n"
         "- Keep natural texture, lighting physics, and realistic dynamic range\n"
-        "- Keep reference image framing and composition as close as possible\n"
+        "- Create a NEW composition and scene arrangement (do not directly clone the style-reference image)\n"
         "- Avoid synthetic/plastic/overprocessed AI look\n"
         + (f"{joined_rules}\n" if joined_rules else "")
     ).strip()
 
 
 def call_modelslab_styleclone(settings: Settings, payload: dict) -> dict:
-    source_image = str(payload["source_image"])
-    reference_image = str(payload["reference_image"])
+    style_image = str(payload["style_image"])
+    subject_image = str(payload["subject_image"])
     prompt = str(payload["prompt"])
+    # Primary path: keep subject identity (face recommended) while applying analyzed style prompt.
     response = requests.post(
+        FACE_GEN_API_URL,
+        json={
+            "key": settings.modelslab_api_key,
+            "prompt": prompt,
+            "face_image": subject_image,
+            "negative_prompt": (
+                "cgi, synthetic skin, fake textures, plastic look, overprocessed ai artifacts, "
+                "cartoonish, painterly, waxy skin, blur, low realism"
+            ),
+            "width": 768,
+            "height": 768,
+            "samples": 1,
+            "num_inference_steps": 31,
+            "guidance_scale": 7.5,
+            "safety_checker": False,
+            "base64": False,
+            "seed": None,
+            "webhook": None,
+            "track_id": None,
+        },
+        timeout=90,
+    )
+    if response.status_code < 400:
+        return response.json()
+
+    # Fallback path: blend subject + style reference images if face-gen endpoint rejects input.
+    fallback = requests.post(
         IMG_MIXER_API_URL,
         json={
             "key": settings.modelslab_api_key,
             "prompt": prompt,
-            # First image anchors composition (reference), second image injects source style.
-            "init_image": [reference_image, source_image],
+            "init_image": [subject_image, style_image],
             "negative_prompt": (
-                "cgi, synthetic skin, fake textures, plastic look, oversharpening, over-smoothing, "
-                "cartoonish, painterly, low detail, low dynamic range, blurry artifacts"
+                "direct copy, identical composition, cgi, synthetic skin, fake textures, plastic look, "
+                "oversharpening, over-smoothing, cartoonish, painterly, low detail, blurry artifacts"
             ),
             "width": 1024,
             "height": 1024,
@@ -1234,8 +1262,8 @@ def call_modelslab_styleclone(settings: Settings, payload: dict) -> dict:
         },
         timeout=90,
     )
-    response.raise_for_status()
-    return response.json()
+    fallback.raise_for_status()
+    return fallback.json()
 
 
 def fetch_result_v7(settings: Settings, request_id: str) -> dict:
@@ -2991,7 +3019,7 @@ async def styleclone_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     context.user_data.clear()
     await update.message.reply_text(
-        "Style Fidelity Clone Step 1/3: Send source image to analyze style."
+        "Style Fidelity Clone Step 1/3: Send style reference image to analyze."
     )
     return WAITING_STYLECLONE_SOURCE_IMAGE
 
@@ -3006,7 +3034,7 @@ async def styleclone_start_from_menu(update: Update, context: ContextTypes.DEFAU
 
     context.user_data.clear()
     await query.edit_message_text(
-        "Style Fidelity Clone Step 1/3: Send source image to analyze style."
+        "Style Fidelity Clone Step 1/3: Send style reference image to analyze."
     )
     return WAITING_STYLECLONE_SOURCE_IMAGE
 
@@ -3023,15 +3051,15 @@ async def receive_styleclone_source_image(update: Update, context: ContextTypes.
         return WAITING_STYLECLONE_SOURCE_IMAGE
 
     tg_file = await context.bot.get_file(image_file.file_id)
-    source_image = telegram_file_url(settings, tg_file.file_path)
-    context.user_data["source_image"] = source_image
+    style_image = telegram_file_url(settings, tg_file.file_path)
+    context.user_data["style_image"] = style_image
 
     status_message = await context.bot.send_message(
         chat_id=update.message.chat_id,
-        text="⏳ Analyzing source style with advanced LLM (GPT-5.4 thinking, fallback GPT-4o)...",
+        text="⏳ Analyzing style reference with advanced LLM (GPT-5.4 thinking, fallback GPT-4o)...",
     )
     try:
-        llm_data = await asyncio.to_thread(call_style_analysis_llm, settings, source_image)
+        llm_data = await asyncio.to_thread(call_style_analysis_llm, settings, style_image)
         analysis = parse_style_analysis_reply(llm_data)
         prompt = build_styleclone_prompt(analysis)
         context.user_data["style_analysis"] = analysis
@@ -3047,7 +3075,7 @@ async def receive_styleclone_source_image(update: Update, context: ContextTypes.
             text=(
                 f"Detected style: {analysis.get('style_class', 'unknown')}\n\n"
                 f"Generated fidelity prompt:\n{truncate_text(prompt, 3000)}\n\n"
-                "Step 2/3: Send reference image for frame/composition matching."
+                "Step 2/3: Send specific subject photo (face recommended) to apply this style."
             ),
         )
         return WAITING_STYLECLONE_REFERENCE_IMAGE
@@ -3076,18 +3104,18 @@ async def receive_styleclone_reference_image(update: Update, context: ContextTyp
         await update.message.reply_text("Please send an image.")
         return WAITING_STYLECLONE_REFERENCE_IMAGE
 
-    source_image = str(context.user_data.get("source_image", "")).strip()
+    style_image = str(context.user_data.get("style_image", "")).strip()
     prompt = str(context.user_data.get("prompt", "")).strip()
-    if not source_image or not prompt:
-        await update.message.reply_text("Missing source analysis context. Send /styleclone and start again.")
+    if not style_image or not prompt:
+        await update.message.reply_text("Missing style analysis context. Send /styleclone and start again.")
         return ConversationHandler.END
 
     tg_file = await context.bot.get_file(image_file.file_id)
-    reference_image = telegram_file_url(settings, tg_file.file_path)
-    context.user_data["reference_image"] = reference_image
+    subject_image = telegram_file_url(settings, tg_file.file_path)
+    context.user_data["subject_image"] = subject_image
     payload = {
-        "source_image": source_image,
-        "reference_image": reference_image,
+        "style_image": style_image,
+        "subject_image": subject_image,
         "prompt": prompt,
     }
     status_message = await context.bot.send_message(

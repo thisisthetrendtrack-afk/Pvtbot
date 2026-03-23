@@ -191,6 +191,7 @@ IMG_MIXER_API_URL = "https://modelslab.com/api/v6/image_editing/img_mixer"
 FACESWAP_API_URL = "https://modelslab.com/api/v6/faceswap/single_face_swap"
 FACESWAP_FETCH_URL_TEMPLATE = "https://modelslab.com/api/v6/faceswap/fetch/{request_id}"
 NSFW_IMAGE_CHECK_API_URL = "https://modelslab.com/api/v3/nsfw_image_check"
+CAPTION_API_URL = "https://modelslab.com/api/v6/image_editing/caption"
 STYLE_ANALYSIS_MODEL_PRIMARY = "openai/gpt-5.4"
 STYLE_ANALYSIS_MODEL_FALLBACK = "openai/gpt-4o"
 RATIO_TO_SIZE = {
@@ -1107,7 +1108,71 @@ def _extract_json_object(value: str) -> Optional[dict]:
         return None
 
 
-def call_style_analysis_llm(settings: Settings, image_url: str) -> dict:
+def _extract_caption_text(data: dict) -> str:
+    candidates: list[str] = []
+    output = data.get("output")
+    if isinstance(output, list):
+        for item in output:
+            if isinstance(item, str) and item.strip():
+                candidates.append(item.strip())
+    elif isinstance(output, str) and output.strip():
+        candidates.append(output.strip())
+
+    for key in ("caption", "message", "result", "description"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            candidates.append(value.strip())
+
+    meta = data.get("meta")
+    if isinstance(meta, dict):
+        for key in ("caption", "description", "text"):
+            value = meta.get(key)
+            if isinstance(value, str) and value.strip():
+                candidates.append(value.strip())
+
+    # Keep the longest non-link text candidate.
+    candidates = [c for c in candidates if not c.lower().startswith("http")]
+    if not candidates:
+        return ""
+    return max(candidates, key=len)
+
+
+def call_modelslab_caption(settings: Settings, image_url: str) -> str:
+    response = requests.post(
+        CAPTION_API_URL,
+        json={
+            "key": settings.modelslab_api_key,
+            "init_image": image_url,
+            "length": "long",
+            "base64": False,
+            "webhook": None,
+            "track_id": None,
+        },
+        timeout=60,
+    )
+    response.raise_for_status()
+    data = response.json()
+    caption = _extract_caption_text(data)
+    if caption:
+        return caption
+
+    status = str(data.get("status", "")).lower()
+    request_id = data.get("id") or data.get("request_id")
+    if status in {"processing", "queued", "pending"} and request_id:
+        deadline = time.time() + 90
+        while time.time() < deadline:
+            polled = fetch_result_image_editing(settings, str(request_id))
+            caption = _extract_caption_text(polled)
+            if caption:
+                return caption
+            polled_status = str(polled.get("status", "")).lower()
+            if polled_status in {"failed", "error"}:
+                break
+            time.sleep(3)
+    return ""
+
+
+def call_style_analysis_llm(settings: Settings, image_url: str, caption_hint: str = "") -> dict:
     system_prompt = (
         "You are a senior visual-style analyst. Analyze image realism and style with strict fidelity.\n"
         "Return JSON only with keys: style_class, visual_notes, fidelity_prompt, quality_rules.\n"
@@ -1123,6 +1188,12 @@ def call_style_analysis_llm(settings: Settings, image_url: str) -> dict:
         "Important: output should feel different from this image (new framing/composition/scene details),"
         " but keep the same style DNA and realism level."
     )
+    if caption_hint:
+        user_text += (
+            "\n\nAdditional image-caption hint extracted from a vision tool:\n"
+            f"{caption_hint}\n"
+            "Use it to improve specificity, but prioritize image-grounded details."
+        )
     payload = {
         "model": STYLE_ANALYSIS_MODEL_PRIMARY,
         "messages": [
@@ -1189,22 +1260,37 @@ def parse_style_analysis_reply(data: dict) -> dict:
     }
 
 
+def is_weak_style_analysis(analysis: dict) -> bool:
+    style_class = str(analysis.get("style_class", "")).strip().lower()
+    fidelity_prompt = str(analysis.get("fidelity_prompt", "")).strip()
+    if not fidelity_prompt:
+        return True
+    if len(fidelity_prompt) < 140:
+        return True
+    if "high-fidelity natural reconstruction of source style" in fidelity_prompt.lower():
+        return True
+    if style_class in {"", "unknown"}:
+        return True
+    return False
+
+
 def build_styleclone_prompt(analysis: dict) -> str:
     style_class = str(analysis.get("style_class", "unknown")).strip()
     visual_notes = str(analysis.get("visual_notes", "")).strip()
     fidelity_prompt = str(analysis.get("fidelity_prompt", "")).strip()
     quality_rules = analysis.get("quality_rules") or []
-    joined_rules = "\n".join(f"- {rule}" for rule in quality_rules if str(rule).strip())
-    return (
-        f"{fidelity_prompt}\n\n"
-        "Strict matching requirements:\n"
-        f"- Preserve source style class: {style_class}\n"
-        f"- Preserve camera realism and authenticity: {visual_notes or 'match source camera feel'}\n"
-        "- Keep natural texture, lighting physics, and realistic dynamic range\n"
-        "- Create a NEW composition and scene arrangement (do not directly clone the style-reference image)\n"
-        "- Avoid synthetic/plastic/overprocessed AI look\n"
-        + (f"{joined_rules}\n" if joined_rules else "")
-    ).strip()
+    details: list[str] = []
+    if style_class and style_class.lower() != "unknown":
+        details.append(f"Style class: {style_class}")
+    if visual_notes:
+        details.append(f"Visual notes: {visual_notes}")
+    if quality_rules:
+        rules = "; ".join(str(rule).strip() for rule in quality_rules if str(rule).strip())
+        if rules:
+            details.append(f"Quality constraints: {rules}")
+    if details:
+        return f"{fidelity_prompt}\n\n" + "\n".join(details)
+    return fidelity_prompt
 
 
 def call_modelslab_styleclone(settings: Settings, payload: dict) -> dict:
@@ -3038,8 +3124,22 @@ async def receive_styleclone_source_image(update: Update, context: ContextTypes.
         text="⏳ Analyzing image with advanced LLM (GPT-5.4 thinking, fallback GPT-4o)...",
     )
     try:
-        llm_data = await asyncio.to_thread(call_style_analysis_llm, settings, style_image)
+        llm_data = await asyncio.to_thread(call_style_analysis_llm, settings, style_image, "")
         analysis = parse_style_analysis_reply(llm_data)
+        caption_hint = ""
+        if is_weak_style_analysis(analysis):
+            caption_hint = await asyncio.to_thread(call_modelslab_caption, settings, style_image)
+            if caption_hint:
+                llm_data = await asyncio.to_thread(
+                    call_style_analysis_llm,
+                    settings,
+                    style_image,
+                    caption_hint,
+                )
+                improved = parse_style_analysis_reply(llm_data)
+                if not is_weak_style_analysis(improved):
+                    analysis = improved
+
         prompt = build_styleclone_prompt(analysis)
 
         await finalize_progress_message(
@@ -3051,6 +3151,12 @@ async def receive_styleclone_source_image(update: Update, context: ContextTypes.
             chat_id=update.message.chat_id,
             text=(
                 f"Detected style: {analysis.get('style_class', 'unknown')}\n\n"
+                + (
+                    f"Vision hint: {truncate_text(caption_hint, 500)}\n\n"
+                    if caption_hint
+                    else ""
+                )
+                +
                 "Detailed prompt:\n"
                 f"{truncate_text(prompt, 3600)}"
             ),

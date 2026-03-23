@@ -285,9 +285,7 @@ REF_IMAGE_MODELS = {
     WAITING_FACESWAP_REFERENCE_IMAGE,
     WAITING_NSFW_IMAGE,
     WAITING_STYLECLONE_SOURCE_IMAGE,
-    WAITING_STYLECLONE_SUBJECT_IMAGE,
-    WAITING_STYLECLONE_ASPECT_RATIO,
-) = range(31)
+) = range(29)
 
 VERIFIED_USERS: set[int] = set()
 RERUN_CALLBACK_PREFIX = "regen_"
@@ -470,12 +468,10 @@ def help_text() -> str:
         "2) Upload source image\n"
         "3) Enter prompt to keep style/identity\n"
         "4) Choose aspect ratio\n\n"
-        "Style Fidelity Clone (/styleclone)\n"
-        "1) Upload style reference image\n"
-        "2) Bot analyzes style with advanced LLM and builds high-fidelity prompt\n"
-        "3) Upload subject/face reference image\n"
-        "4) Choose aspect ratio\n"
-        "5) Bot generates with Nano Banana preserving realism and style essence\n\n"
+        "Image Prompt Analyzer (/styleclone)\n"
+        "1) Upload one image\n"
+        "2) Bot analyzes with advanced LLM\n"
+        "3) Bot returns a detailed reusable prompt\n\n"
         "LLM Chat (/llm)\n"
         "1) Choose model family\n"
         "2) Ask your question (memory stays in this model thread)\n"
@@ -523,7 +519,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("🔓 Uncensored Chat", callback_data="menu_uncensored")],
             [InlineKeyboardButton("🪄 Image Edit (Nano Banana 2)", callback_data="menu_i2i")],
             [InlineKeyboardButton("🧭 Reference Image Generate", callback_data="menu_refimg")],
-            [InlineKeyboardButton("🧬 Style Fidelity Clone", callback_data="menu_styleclone")],
+            [InlineKeyboardButton("🧠 Image Prompt Analyzer", callback_data="menu_styleclone")],
             [InlineKeyboardButton("🎭 Face Swap", callback_data="menu_faceswap")],
             [InlineKeyboardButton("🧪 NSFW Image Check", callback_data="menu_nsfw")],
             [InlineKeyboardButton("🎬 Text to Video", callback_data="menu_t2v")],
@@ -3003,7 +2999,7 @@ async def styleclone_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     context.user_data.clear()
     await update.message.reply_text(
-        "Style Fidelity Clone Step 1/4: Send style reference image to analyze."
+        "Image Prompt Analyzer Step 1/1: Send one image."
     )
     return WAITING_STYLECLONE_SOURCE_IMAGE
 
@@ -3018,7 +3014,7 @@ async def styleclone_start_from_menu(update: Update, context: ContextTypes.DEFAU
 
     context.user_data.clear()
     await query.edit_message_text(
-        "Style Fidelity Clone Step 1/4: Send style reference image to analyze."
+        "Image Prompt Analyzer Step 1/1: Send one image."
     )
     return WAITING_STYLECLONE_SOURCE_IMAGE
 
@@ -3036,33 +3032,30 @@ async def receive_styleclone_source_image(update: Update, context: ContextTypes.
 
     tg_file = await context.bot.get_file(image_file.file_id)
     style_image = telegram_file_url(settings, tg_file.file_path)
-    context.user_data["style_image"] = style_image
 
     status_message = await context.bot.send_message(
         chat_id=update.message.chat_id,
-        text="⏳ Analyzing style reference with advanced LLM (GPT-5.4 thinking, fallback GPT-4o)...",
+        text="⏳ Analyzing image with advanced LLM (GPT-5.4 thinking, fallback GPT-4o)...",
     )
     try:
         llm_data = await asyncio.to_thread(call_style_analysis_llm, settings, style_image)
         analysis = parse_style_analysis_reply(llm_data)
         prompt = build_styleclone_prompt(analysis)
-        context.user_data["style_analysis"] = analysis
-        context.user_data["prompt"] = prompt
 
         await finalize_progress_message(
             context,
             status_message,
-            "✅ Style analysis complete.",
+            "✅ Image analysis complete.",
         )
         await context.bot.send_message(
             chat_id=update.message.chat_id,
             text=(
                 f"Detected style: {analysis.get('style_class', 'unknown')}\n\n"
-                f"Generated fidelity prompt:\n{truncate_text(prompt, 3000)}\n\n"
-                "Step 2/4: Send specific subject photo (face recommended)."
+                "Detailed prompt:\n"
+                f"{truncate_text(prompt, 3600)}"
             ),
         )
-        return WAITING_STYLECLONE_SUBJECT_IMAGE
+        return ConversationHandler.END
     except Exception as exc:  # noqa: BLE001
         logger.exception("Style analysis failed")
         await finalize_progress_message(
@@ -3073,143 +3066,6 @@ async def receive_styleclone_source_image(update: Update, context: ContextTypes.
         await context.bot.send_message(
             chat_id=update.message.chat_id,
             text=f"Style analysis error: {exc}",
-        )
-        return ConversationHandler.END
-
-
-async def receive_styleclone_subject_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    settings: Settings = context.bot_data["settings"]
-    image_file = None
-    if update.message.photo:
-        image_file = update.message.photo[-1]
-    elif update.message.document and str(update.message.document.mime_type).startswith("image/"):
-        image_file = update.message.document
-    if image_file is None:
-        await update.message.reply_text("Please send an image.")
-        return WAITING_STYLECLONE_SUBJECT_IMAGE
-
-    style_image = str(context.user_data.get("style_image", "")).strip()
-    prompt = str(context.user_data.get("prompt", "")).strip()
-    if not style_image or not prompt:
-        await update.message.reply_text("Missing style analysis context. Send /styleclone and start again.")
-        return ConversationHandler.END
-
-    tg_file = await context.bot.get_file(image_file.file_id)
-    subject_image = telegram_file_url(settings, tg_file.file_path)
-    context.user_data["subject_image"] = subject_image
-    last_ratio = get_user_pref(context, update.effective_user.id, "styleclone_aspect_ratio", "1:1")
-    keyboard = [
-        [
-            InlineKeyboardButton(_selected_label("1:1", last_ratio == "1:1"), callback_data="style_ar_1:1"),
-            InlineKeyboardButton(_selected_label("16:9", last_ratio == "16:9"), callback_data="style_ar_16:9"),
-            InlineKeyboardButton(_selected_label("9:16", last_ratio == "9:16"), callback_data="style_ar_9:16"),
-        ],
-        [
-            InlineKeyboardButton(_selected_label("4:5", last_ratio == "4:5"), callback_data="style_ar_4:5"),
-            InlineKeyboardButton(_selected_label("3:4", last_ratio == "3:4"), callback_data="style_ar_3:4"),
-            InlineKeyboardButton(_selected_label("2:3", last_ratio == "2:3"), callback_data="style_ar_2:3"),
-        ],
-    ]
-    await update.message.reply_text(
-        "Style Fidelity Clone Step 3/4: Choose aspect ratio. (✅ = last used)",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-    return WAITING_STYLECLONE_ASPECT_RATIO
-
-
-async def receive_styleclone_aspect_ratio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    settings: Settings = context.bot_data["settings"]
-    query = update.callback_query
-    await query.answer()
-
-    aspect_ratio = query.data.replace("style_ar_", "", 1)
-    if aspect_ratio not in T2I_ASPECT_RATIOS:
-        await query.edit_message_text("Unsupported aspect ratio. Send /styleclone and start again.")
-        return ConversationHandler.END
-
-    style_image = str(context.user_data.get("style_image", "")).strip()
-    subject_image = str(context.user_data.get("subject_image", "")).strip()
-    prompt = str(context.user_data.get("prompt", "")).strip()
-    if not style_image or not subject_image or not prompt:
-        await query.edit_message_text("Missing style context. Send /styleclone and start again.")
-        return ConversationHandler.END
-
-    context.user_data["aspect_ratio"] = aspect_ratio
-    set_user_pref(context, query.from_user.id, "styleclone_aspect_ratio", aspect_ratio)
-    payload = {
-        "style_image": style_image,
-        "subject_image": subject_image,
-        "prompt": prompt,
-        "aspect_ratio": aspect_ratio,
-    }
-    await query.edit_message_text(
-        "Style Fidelity Clone Step 4/4: Generating with Nano Banana. Please wait..."
-    )
-    status_message = await context.bot.send_message(
-        chat_id=query.message.chat_id,
-        text="⏳ Style Fidelity Clone\nStatus: Submitted\nElapsed: 0s",
-    )
-    progress_callback = make_progress_callback(
-        context=context,
-        status_message=status_message,
-        job_title="Style Fidelity Clone",
-    )
-    try:
-        created = await asyncio.to_thread(call_modelslab_styleclone, settings, payload)
-        output = created.get("output") or []
-        image_url: Optional[str] = output[0] if str(created.get("status", "")).lower() == "success" and output else None
-        if not image_url:
-            request_id = created.get("id") or created.get("request_id")
-            if not request_id:
-                await context.bot.send_message(
-                    chat_id=query.message.chat_id,
-                    text=f"Unexpected ModelsLab response: {created}",
-                )
-                return ConversationHandler.END
-            image_url = await poll_result(
-                settings,
-                request_id=request_id,
-                fetch_fn=fetch_result_t2i,
-                progress_callback=progress_callback,
-                max_wait=360,
-            )
-        if not image_url:
-            await finalize_progress_message(
-                context,
-                status_message,
-                "❌ Style clone failed or timed out.",
-            )
-            await context.bot.send_message(
-                chat_id=query.message.chat_id,
-                text="Style clone failed or timed out. Please try /styleclone again.",
-            )
-            return ConversationHandler.END
-
-        await finalize_progress_message(
-            context,
-            status_message,
-            "✅ Style clone completed. Sending image...",
-        )
-        await send_image_result(
-            context,
-            query.message.chat_id,
-            image_url,
-            payload,
-            model_name=f"Nano Banana Style Fidelity Clone ({aspect_ratio})",
-            user_id=query.from_user.id,
-            task_type="styleclone",
-        )
-        return ConversationHandler.END
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Style clone API call failed")
-        await finalize_progress_message(
-            context,
-            status_message,
-            "❌ Style clone failed.",
-        )
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=f"Style clone API error: {exc}",
         )
         return ConversationHandler.END
 
@@ -4228,12 +4084,6 @@ def main() -> None:
         states={
             WAITING_STYLECLONE_SOURCE_IMAGE: [
                 MessageHandler(filters.PHOTO | filters.Document.ALL, receive_styleclone_source_image)
-            ],
-            WAITING_STYLECLONE_SUBJECT_IMAGE: [
-                MessageHandler(filters.PHOTO | filters.Document.ALL, receive_styleclone_subject_image)
-            ],
-            WAITING_STYLECLONE_ASPECT_RATIO: [
-                CallbackQueryHandler(receive_styleclone_aspect_ratio, pattern=r"^style_ar_")
             ],
         },
         fallbacks=[

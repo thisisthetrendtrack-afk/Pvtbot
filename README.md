@@ -50,7 +50,7 @@ bash start.sh
 - `/imageedit` - alias of `/imgedit`
 - `/refimg` - reference-image toolkit flow (multiple models)
 - `/reference` - alias of `/refimg`
-- `/styleclone` - style fidelity clone flow (LLM vision + reference render)
+- `/styleclone` - image prompt analyzer flow (single image)
 - `/cloneimg` - alias of `/styleclone`
 - `/faceswap` - face swap flow (single face swap)
 - `/swapface` - alias of `/faceswap`
@@ -74,7 +74,7 @@ The bot now opens with a professional inline menu containing:
 - **Uncensored Chat**
 - **Image Edit**
 - **Reference Image Generate**
-- **Style Fidelity Clone**
+- **Image Prompt Analyzer**
 - **Face Swap**
 - **NSFW Image Check**
 - **Text to Video**
@@ -163,15 +163,13 @@ From ModelsLab LLM categories, these are strong picks:
 5. Choose aspect ratio
 6. Bot calls the selected reference endpoint and sends generated image
 
-## Style fidelity clone flow (`/styleclone`)
+## Image prompt analyzer flow (`/styleclone`)
 
-1. Send `/styleclone` (or choose **Style Fidelity Clone** in menu)
-2. Upload style-reference image (look/quality style to analyze)
+1. Send `/styleclone` (or choose **Image Prompt Analyzer** in menu)
+2. Upload one image
 3. Bot analyzes style/depth/realism with advanced LLM (`GPT-5.4` requested, fallback `GPT-4o` when unavailable)
-4. Bot generates a high-fidelity style prompt designed to keep style authenticity but avoid direct copying
-5. Upload specific subject image (face photo recommended)
-6. Choose aspect ratio (`1:1`, `16:9`, `9:16`, `4:5`, `3:4`, `2:3`)
-7. Bot sends GPT-generated prompt + both references to **Nano Banana image-to-image** API and returns a realistic style-consistent variation
+4. Bot returns a detailed reusable prompt (lighting, texture, camera feel, composition, realism)
+5. No reference image or generation step is required in this mode
 
 ## Face swap flow (`/faceswap`)
 

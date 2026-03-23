@@ -170,7 +170,8 @@ From ModelsLab LLM categories, these are strong picks:
 3. Bot analyzes style/depth/realism with advanced LLM (`GPT-5.4` requested, fallback `GPT-4o` when unavailable)
 4. Bot generates a high-fidelity style prompt designed to keep style authenticity but avoid direct copying
 5. Upload specific subject image (face photo recommended)
-6. Bot generates an output image that applies the analyzed style to the subject while keeping realistic quality
+6. Choose aspect ratio (`1:1`, `16:9`, `9:16`, `4:5`, `3:4`, `2:3`)
+7. Bot sends GPT-generated prompt + both references to **Nano Banana image-to-image** API and returns a realistic style-consistent variation
 
 ## Face swap flow (`/faceswap`)
 

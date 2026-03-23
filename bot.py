@@ -285,8 +285,9 @@ REF_IMAGE_MODELS = {
     WAITING_FACESWAP_REFERENCE_IMAGE,
     WAITING_NSFW_IMAGE,
     WAITING_STYLECLONE_SOURCE_IMAGE,
-    WAITING_STYLECLONE_REFERENCE_IMAGE,
-) = range(30)
+    WAITING_STYLECLONE_SUBJECT_IMAGE,
+    WAITING_STYLECLONE_ASPECT_RATIO,
+) = range(31)
 
 VERIFIED_USERS: set[int] = set()
 RERUN_CALLBACK_PREFIX = "regen_"
@@ -470,10 +471,11 @@ def help_text() -> str:
         "3) Enter prompt to keep style/identity\n"
         "4) Choose aspect ratio\n\n"
         "Style Fidelity Clone (/styleclone)\n"
-        "1) Upload source image (style to analyze)\n"
+        "1) Upload style reference image\n"
         "2) Bot analyzes style with advanced LLM and builds high-fidelity prompt\n"
-        "3) Upload reference image\n"
-        "4) Bot generates a style-matched clone preserving realism\n\n"
+        "3) Upload subject/face reference image\n"
+        "4) Choose aspect ratio\n"
+        "5) Bot generates with Nano Banana preserving realism and style essence\n\n"
         "LLM Chat (/llm)\n"
         "1) Choose model family\n"
         "2) Ask your question (memory stays in this model thread)\n"
@@ -1213,26 +1215,17 @@ def call_modelslab_styleclone(settings: Settings, payload: dict) -> dict:
     style_image = str(payload["style_image"])
     subject_image = str(payload["subject_image"])
     prompt = str(payload["prompt"])
-    # Primary path: keep subject identity (face recommended) while applying analyzed style prompt.
+    aspect_ratio = str(payload.get("aspect_ratio", "1:1"))
+    # Required path: final generation handled by Nano Banana (gemini-3.1-i2i).
+    # First try subject + style references together; fallback to subject-only if provider rejects multi-reference input.
     response = requests.post(
-        FACE_GEN_API_URL,
+        I2I_API_URL,
         json={
             "key": settings.modelslab_api_key,
             "prompt": prompt,
-            "face_image": subject_image,
-            "negative_prompt": (
-                "cgi, synthetic skin, fake textures, plastic look, overprocessed ai artifacts, "
-                "cartoonish, painterly, waxy skin, blur, low realism"
-            ),
-            "width": 768,
-            "height": 768,
-            "samples": 1,
-            "num_inference_steps": 31,
-            "guidance_scale": 7.5,
-            "safety_checker": False,
-            "base64": False,
-            "seed": None,
-            "webhook": None,
+            "model_id": I2I_MODEL_ID,
+            "init_image": [subject_image, style_image],
+            "aspect_ratio": aspect_ratio,
             "track_id": None,
         },
         timeout=90,
@@ -1240,24 +1233,15 @@ def call_modelslab_styleclone(settings: Settings, payload: dict) -> dict:
     if response.status_code < 400:
         return response.json()
 
-    # Fallback path: blend subject + style reference images if face-gen endpoint rejects input.
+    # Fallback path: subject image as init; style is already encoded in generated prompt.
     fallback = requests.post(
-        IMG_MIXER_API_URL,
+        I2I_API_URL,
         json={
             "key": settings.modelslab_api_key,
             "prompt": prompt,
-            "init_image": [subject_image, style_image],
-            "negative_prompt": (
-                "direct copy, identical composition, cgi, synthetic skin, fake textures, plastic look, "
-                "oversharpening, over-smoothing, cartoonish, painterly, low detail, blurry artifacts"
-            ),
-            "width": 1024,
-            "height": 1024,
-            "steps": 41,
-            "guidance_scale": 8,
-            "samples": 1,
-            "seed": None,
-            "webhook": None,
+            "model_id": I2I_MODEL_ID,
+            "init_image": [subject_image],
+            "aspect_ratio": aspect_ratio,
             "track_id": None,
         },
         timeout=90,
@@ -1609,10 +1593,10 @@ def generation_config_from_task(task_type: str, payload: dict) -> dict:
     if task_type == "styleclone":
         return {
             "call": call_modelslab_styleclone,
-            "fetch": fetch_result_image_editing,
+            "fetch": fetch_result_t2i,
             "kind": "image",
             "job_title": "Style Fidelity Clone",
-            "max_wait": 300,
+            "max_wait": 360,
         }
     raise RuntimeError(f"Unsupported saved task type: {task_type}")
 
@@ -3019,7 +3003,7 @@ async def styleclone_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     context.user_data.clear()
     await update.message.reply_text(
-        "Style Fidelity Clone Step 1/3: Send style reference image to analyze."
+        "Style Fidelity Clone Step 1/4: Send style reference image to analyze."
     )
     return WAITING_STYLECLONE_SOURCE_IMAGE
 
@@ -3034,7 +3018,7 @@ async def styleclone_start_from_menu(update: Update, context: ContextTypes.DEFAU
 
     context.user_data.clear()
     await query.edit_message_text(
-        "Style Fidelity Clone Step 1/3: Send style reference image to analyze."
+        "Style Fidelity Clone Step 1/4: Send style reference image to analyze."
     )
     return WAITING_STYLECLONE_SOURCE_IMAGE
 
@@ -3075,10 +3059,10 @@ async def receive_styleclone_source_image(update: Update, context: ContextTypes.
             text=(
                 f"Detected style: {analysis.get('style_class', 'unknown')}\n\n"
                 f"Generated fidelity prompt:\n{truncate_text(prompt, 3000)}\n\n"
-                "Step 2/3: Send specific subject photo (face recommended) to apply this style."
+                "Step 2/4: Send specific subject photo (face recommended)."
             ),
         )
-        return WAITING_STYLECLONE_REFERENCE_IMAGE
+        return WAITING_STYLECLONE_SUBJECT_IMAGE
     except Exception as exc:  # noqa: BLE001
         logger.exception("Style analysis failed")
         await finalize_progress_message(
@@ -3093,7 +3077,7 @@ async def receive_styleclone_source_image(update: Update, context: ContextTypes.
         return ConversationHandler.END
 
 
-async def receive_styleclone_reference_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def receive_styleclone_subject_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     settings: Settings = context.bot_data["settings"]
     image_file = None
     if update.message.photo:
@@ -3102,7 +3086,7 @@ async def receive_styleclone_reference_image(update: Update, context: ContextTyp
         image_file = update.message.document
     if image_file is None:
         await update.message.reply_text("Please send an image.")
-        return WAITING_STYLECLONE_REFERENCE_IMAGE
+        return WAITING_STYLECLONE_SUBJECT_IMAGE
 
     style_image = str(context.user_data.get("style_image", "")).strip()
     prompt = str(context.user_data.get("prompt", "")).strip()
@@ -3113,13 +3097,56 @@ async def receive_styleclone_reference_image(update: Update, context: ContextTyp
     tg_file = await context.bot.get_file(image_file.file_id)
     subject_image = telegram_file_url(settings, tg_file.file_path)
     context.user_data["subject_image"] = subject_image
+    last_ratio = get_user_pref(context, update.effective_user.id, "styleclone_aspect_ratio", "1:1")
+    keyboard = [
+        [
+            InlineKeyboardButton(_selected_label("1:1", last_ratio == "1:1"), callback_data="style_ar_1:1"),
+            InlineKeyboardButton(_selected_label("16:9", last_ratio == "16:9"), callback_data="style_ar_16:9"),
+            InlineKeyboardButton(_selected_label("9:16", last_ratio == "9:16"), callback_data="style_ar_9:16"),
+        ],
+        [
+            InlineKeyboardButton(_selected_label("4:5", last_ratio == "4:5"), callback_data="style_ar_4:5"),
+            InlineKeyboardButton(_selected_label("3:4", last_ratio == "3:4"), callback_data="style_ar_3:4"),
+            InlineKeyboardButton(_selected_label("2:3", last_ratio == "2:3"), callback_data="style_ar_2:3"),
+        ],
+    ]
+    await update.message.reply_text(
+        "Style Fidelity Clone Step 3/4: Choose aspect ratio. (✅ = last used)",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return WAITING_STYLECLONE_ASPECT_RATIO
+
+
+async def receive_styleclone_aspect_ratio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    settings: Settings = context.bot_data["settings"]
+    query = update.callback_query
+    await query.answer()
+
+    aspect_ratio = query.data.replace("style_ar_", "", 1)
+    if aspect_ratio not in T2I_ASPECT_RATIOS:
+        await query.edit_message_text("Unsupported aspect ratio. Send /styleclone and start again.")
+        return ConversationHandler.END
+
+    style_image = str(context.user_data.get("style_image", "")).strip()
+    subject_image = str(context.user_data.get("subject_image", "")).strip()
+    prompt = str(context.user_data.get("prompt", "")).strip()
+    if not style_image or not subject_image or not prompt:
+        await query.edit_message_text("Missing style context. Send /styleclone and start again.")
+        return ConversationHandler.END
+
+    context.user_data["aspect_ratio"] = aspect_ratio
+    set_user_pref(context, query.from_user.id, "styleclone_aspect_ratio", aspect_ratio)
     payload = {
         "style_image": style_image,
         "subject_image": subject_image,
         "prompt": prompt,
+        "aspect_ratio": aspect_ratio,
     }
+    await query.edit_message_text(
+        "Style Fidelity Clone Step 4/4: Generating with Nano Banana. Please wait..."
+    )
     status_message = await context.bot.send_message(
-        chat_id=update.message.chat_id,
+        chat_id=query.message.chat_id,
         text="⏳ Style Fidelity Clone\nStatus: Submitted\nElapsed: 0s",
     )
     progress_callback = make_progress_callback(
@@ -3135,16 +3162,16 @@ async def receive_styleclone_reference_image(update: Update, context: ContextTyp
             request_id = created.get("id") or created.get("request_id")
             if not request_id:
                 await context.bot.send_message(
-                    chat_id=update.message.chat_id,
+                    chat_id=query.message.chat_id,
                     text=f"Unexpected ModelsLab response: {created}",
                 )
                 return ConversationHandler.END
             image_url = await poll_result(
                 settings,
                 request_id=request_id,
-                fetch_fn=fetch_result_image_editing,
+                fetch_fn=fetch_result_t2i,
                 progress_callback=progress_callback,
-                max_wait=300,
+                max_wait=360,
             )
         if not image_url:
             await finalize_progress_message(
@@ -3153,7 +3180,7 @@ async def receive_styleclone_reference_image(update: Update, context: ContextTyp
                 "❌ Style clone failed or timed out.",
             )
             await context.bot.send_message(
-                chat_id=update.message.chat_id,
+                chat_id=query.message.chat_id,
                 text="Style clone failed or timed out. Please try /styleclone again.",
             )
             return ConversationHandler.END
@@ -3165,11 +3192,11 @@ async def receive_styleclone_reference_image(update: Update, context: ContextTyp
         )
         await send_image_result(
             context,
-            update.message.chat_id,
+            query.message.chat_id,
             image_url,
             payload,
-            model_name="Style Fidelity Clone",
-            user_id=update.effective_user.id,
+            model_name=f"Nano Banana Style Fidelity Clone ({aspect_ratio})",
+            user_id=query.from_user.id,
             task_type="styleclone",
         )
         return ConversationHandler.END
@@ -3181,7 +3208,7 @@ async def receive_styleclone_reference_image(update: Update, context: ContextTyp
             "❌ Style clone failed.",
         )
         await context.bot.send_message(
-            chat_id=update.message.chat_id,
+            chat_id=query.message.chat_id,
             text=f"Style clone API error: {exc}",
         )
         return ConversationHandler.END
@@ -4202,8 +4229,11 @@ def main() -> None:
             WAITING_STYLECLONE_SOURCE_IMAGE: [
                 MessageHandler(filters.PHOTO | filters.Document.ALL, receive_styleclone_source_image)
             ],
-            WAITING_STYLECLONE_REFERENCE_IMAGE: [
-                MessageHandler(filters.PHOTO | filters.Document.ALL, receive_styleclone_reference_image)
+            WAITING_STYLECLONE_SUBJECT_IMAGE: [
+                MessageHandler(filters.PHOTO | filters.Document.ALL, receive_styleclone_subject_image)
+            ],
+            WAITING_STYLECLONE_ASPECT_RATIO: [
+                CallbackQueryHandler(receive_styleclone_aspect_ratio, pattern=r"^style_ar_")
             ],
         },
         fallbacks=[

@@ -863,20 +863,69 @@ def call_modelslab_t2i(settings: Settings, payload: dict) -> dict:
 
 
 def call_modelslab_i2i(settings: Settings, payload: dict) -> dict:
-    response = requests.post(
-        I2I_API_URL,
+    body = {
+        "key": settings.modelslab_api_key,
+        "prompt": payload["prompt"],
+        "model_id": I2I_MODEL_ID,
+        "init_image": payload["init_image"],
+        "aspect_ratio": payload["aspect_ratio"],
+        "track_id": None,
+    }
+    response = requests.post(I2I_API_URL, json=body, timeout=60)
+    if response.status_code == 403:
+        logger.warning("v7 image-to-image forbidden; falling back to v6 edit endpoints")
+        return call_modelslab_i2i_fallback_v6(settings, payload)
+    response.raise_for_status()
+    return response.json()
+
+
+def call_modelslab_i2i_fallback_v6(settings: Settings, payload: dict) -> dict:
+    """Fallback chain for accounts without v7 i2i permission."""
+    init_images = payload.get("init_image") or []
+    init_image = init_images[0] if init_images else ""
+    if not init_image:
+        raise RuntimeError("Missing init_image for i2i fallback")
+
+    # 1) Try Qwen Edit first (closest semantic replacement for edit/reference flow).
+    qwen_response = requests.post(
+        QWEN_EDIT_API_URL,
         json={
             "key": settings.modelslab_api_key,
             "prompt": payload["prompt"],
-            "model_id": I2I_MODEL_ID,
-            "init_image": payload["init_image"],
-            "aspect_ratio": payload["aspect_ratio"],
+            "init_image": [init_image],
+            "model_id": "qwen-edit-2511",
+            "safety_checker": True,
+            "base64": False,
+            "webhook": None,
             "track_id": None,
         },
         timeout=60,
     )
-    response.raise_for_status()
-    return response.json()
+    if qwen_response.status_code < 400:
+        return qwen_response.json()
+
+    # 2) Final fallback: image mixer with duplicated source image.
+    width, height = RATIO_TO_SIZE.get(str(payload.get("aspect_ratio", "1:1")), (1024, 1024))
+    mixer_response = requests.post(
+        IMG_MIXER_API_URL,
+        json={
+            "key": settings.modelslab_api_key,
+            "prompt": payload["prompt"],
+            "init_image": [init_image, init_image],
+            "negative_prompt": "",
+            "width": width,
+            "height": height,
+            "steps": 31,
+            "guidance_scale": 8,
+            "samples": 1,
+            "seed": None,
+            "webhook": None,
+            "track_id": None,
+        },
+        timeout=60,
+    )
+    mixer_response.raise_for_status()
+    return mixer_response.json()
 
 
 def call_modelslab_reference(settings: Settings, payload: dict) -> dict:

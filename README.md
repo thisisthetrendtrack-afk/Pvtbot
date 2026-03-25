@@ -19,9 +19,9 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-export TELEGRAM_TOKEN="your_telegram_bot_token"
-export MODELSLAB_API_KEY="your_modelslab_api_key"
-export ACCESS_CODE="optional_private_code"
+export TELEGRAM_TOKEN="8783783821:AAG_pw_UfKl5wAL8IGpHC9fnHFMZatyC3eU"
+export MODELSLAB_API_KEY="DehOCA2JIkE0hpPD3cz54qPgt7z2PSMI2vF8621DTIFDqOE93R1rkZwTis7K"
+export ACCESS_CODE="628008"
 
 python bot.py
 ```

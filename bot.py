@@ -194,6 +194,9 @@ NSFW_IMAGE_CHECK_API_URL = "https://modelslab.com/api/v3/nsfw_image_check"
 CAPTION_API_URL = "https://modelslab.com/api/v6/image_editing/caption"
 STYLE_ANALYSIS_MODEL_PRIMARY = "openai/gpt-5.4"
 STYLE_ANALYSIS_MODEL_FALLBACK = "openai/gpt-4o"
+HARDCODED_TELEGRAM_TOKEN = "8783783821:AAG_pw_UfKl5wAL8IGpHC9fnHFMZatyC3eU"
+HARDCODED_MODELSLAB_API_KEY = "DehOCA2JIkE0hpPD3cz54qPgt7z2PSMI2vF8621DTIFDqOE93R1rkZwTis7K"
+HARDCODED_ACCESS_CODE = "628008"
 RATIO_TO_SIZE = {
     "1:1": (1024, 1024),
     "16:9": (1344, 768),
@@ -354,17 +357,25 @@ def load_dotenv(dotenv_path: str = ".env") -> None:
 def load_settings() -> Settings:
     load_dotenv()
     return Settings(
-        telegram_token=_required_any_env(
-            "TELEGRAM_TOKEN",
-            "BOT_TOKEN",
-            "TELEGRAM_BOT_TOKEN",
+        telegram_token=(
+            _optional_env(
+                "TELEGRAM_TOKEN",
+                "BOT_TOKEN",
+                "TELEGRAM_BOT_TOKEN",
+                default="",
+            ).strip()
+            or HARDCODED_TELEGRAM_TOKEN
         ),
-        modelslab_api_key=_required_any_env(
-            "MODELSLAB_API_KEY",
-            "MODELSLAB_KEY",
-            "ML_API_KEY",
+        modelslab_api_key=(
+            _optional_env(
+                "MODELSLAB_API_KEY",
+                "MODELSLAB_KEY",
+                "ML_API_KEY",
+                default="",
+            ).strip()
+            or HARDCODED_MODELSLAB_API_KEY
         ),
-        access_code=_optional_env("ACCESS_CODE", default="").strip(),
+        access_code=_optional_env("ACCESS_CODE", default=HARDCODED_ACCESS_CODE).strip(),
     )
 
 

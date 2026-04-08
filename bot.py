@@ -1446,37 +1446,127 @@ def fetch_result_v7(settings: Settings, request_id: str) -> dict:
     return response.json()
 
 
+def normalize_llm_messages(messages: object) -> list[dict]:
+    """Keep only valid chat messages in a plain text format."""
+    if not isinstance(messages, list):
+        return []
+    normalized: list[dict] = []
+    for item in messages:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role", "")).strip().lower()
+        if role not in {"system", "user", "assistant"}:
+            continue
+        content = item.get("content", "")
+        if isinstance(content, (dict, list)):
+            content = json.dumps(content, ensure_ascii=False)
+        content_text = str(content).strip()
+        if not content_text:
+            continue
+        normalized.append({"role": role, "content": truncate_text(content_text, 4000)})
+    # Keep only the most recent messages to reduce schema/context issues.
+    return normalized[-(LLM_MAX_HISTORY_MESSAGES + 2) :]
+
+
+def llm_http_error_detail(response: requests.Response) -> str:
+    try:
+        payload = response.json()
+        if isinstance(payload, dict):
+            for key in ("message", "error", "detail"):
+                value = payload.get(key)
+                if value:
+                    return truncate_text(str(value), 500)
+            return truncate_text(json.dumps(payload, ensure_ascii=False), 500)
+        if isinstance(payload, list):
+            return truncate_text(json.dumps(payload, ensure_ascii=False), 500)
+    except Exception:  # noqa: BLE001
+        pass
+    return truncate_text((response.text or "Bad Request").strip(), 500)
+
+
 def call_modelslab_llm(settings: Settings, payload: dict) -> dict:
     model_key = str(payload["llm_model_key"])
     model_cfg = LLM_MODELS[model_key]
-    messages = payload.get("messages")
+    messages = normalize_llm_messages(payload.get("messages"))
     if not messages:
-        messages = [
+        messages = normalize_llm_messages(
+            [
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant. Give clear, practical answers.",
+                },
+                {
+                    "role": "user",
+                    "content": payload["prompt"],
+                },
+            ]
+        )
+
+    headers = {
+        "Authorization": f"Bearer {settings.modelslab_api_key}",
+        "Content-Type": "application/json",
+    }
+
+    requested_model = str(model_cfg["model"])
+    max_tokens = int(payload.get("max_tokens", 700))
+    temperature = float(payload.get("temperature", 0.7))
+
+    def post_with_variants(model_name: str) -> requests.Response:
+        variants = [
             {
-                "role": "system",
-                "content": "You are a helpful assistant. Give clear, practical answers.",
+                "model": model_name,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
             },
             {
-                "role": "user",
-                "content": payload["prompt"],
+                "model": model_name,
+                "messages": messages,
+                "max_tokens": max_tokens,
             },
+            {"model": model_name, "messages": messages},
         ]
-    response = requests.post(
-        LLM_CHAT_API_URL,
-        headers={
-            "Authorization": f"Bearer {settings.modelslab_api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model_cfg["model"],
-            "messages": messages,
-            "max_tokens": payload.get("max_tokens", 700),
-            "temperature": 0.7,
-        },
-        timeout=90,
-    )
-    response.raise_for_status()
-    return response.json()
+        last_response: Optional[requests.Response] = None
+        for body in variants:
+            response = requests.post(
+                LLM_CHAT_API_URL,
+                headers=headers,
+                json=body,
+                timeout=90,
+            )
+            if response.status_code < 400:
+                return response
+            last_response = response
+            # Retry compatible body variants for schema-related request errors only.
+            if response.status_code not in (400, 404, 422):
+                break
+        return last_response or requests.post(
+            LLM_CHAT_API_URL,
+            headers=headers,
+            json=variants[0],
+            timeout=90,
+        )
+
+    response = post_with_variants(requested_model)
+    if response.status_code >= 400 and model_key != "best":
+        fallback_model = str(LLM_MODELS["best"]["model"])
+        fallback_response = post_with_variants(fallback_model)
+        if fallback_response.status_code < 400:
+            data = fallback_response.json()
+            data["_requested_model"] = requested_model
+            data["_forced_fallback_model"] = fallback_model
+            return data
+        response = fallback_response
+
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"LLM HTTP {response.status_code}: {llm_http_error_detail(response)}"
+        )
+
+    data = response.json()
+    if "model" not in data:
+        data["model"] = requested_model
+    return data
 
 
 def fetch_result_v6(settings: Settings, request_id: str) -> dict:
